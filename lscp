@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# lscp <n> <local> <remote> — agent-free scp to lab node N.
+LAB_SSH_KEY="${LAB_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+n="$1"; shift
+exec scp -i "$LAB_SSH_KEY" -o IdentityAgent=none -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -o ConnectTimeout=5 -o LogLevel=ERROR -P "$((2230 + n))" "$1" "root@127.0.0.1:$2"
