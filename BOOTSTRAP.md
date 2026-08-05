@@ -8,8 +8,9 @@ hand-seeding of host rows and no editing of join_peers.
 
 ## SSH
 
-`create` authorises `$SSH_KEY` (default `~/.ssh/id_ed25519.pub`), NOT
-`cluster_key`. Connect with `-i ~/.ssh/id_ed25519`.
+`create` authorises both `$SSH_KEY` (default `~/.ssh/id_ed25519.pub`) and the
+lab's own `cluster_key` (generated on the spot if absent), so `./lab.sh ssh`
+works agent-free from the first boot.
 
 Add `-o IdentityAgent=none -o IdentitiesOnly=yes` to every ssh/scp. Without it a
 failing 1Password agent makes connections hang or fail on "Permission denied",

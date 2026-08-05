@@ -63,15 +63,8 @@ a locked 1Password agent makes every connection fail with "agent refused
 operation" — which reads exactly like the nodes having died.
 
 `cluster_key` is the lab's own throwaway keypair (gitignored, never commit
-it). Generate one if absent:
-
-```bash
-ssh-keygen -t ed25519 -N '' -f cluster_key -C litevirt-lab
-```
-
-`create` authorizes `$SSH_KEY` on the nodes; authorize `cluster_key.pub`
-cluster-wide during bootstrap if you want the agent-free path for
-`lab.sh ssh`.
+it). `create` generates it if absent and authorizes it on every node
+alongside `$SSH_KEY`, so `lab.sh ssh` / `deploy` work with the agent locked.
 
 ## Layout
 

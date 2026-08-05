@@ -59,6 +59,11 @@ create() {
   [[ -f "$BASE" ]] || { echo "base image missing: $BASE" >&2; exit 1; }
   [[ -f "$SSH_KEY" ]] || { echo "ssh key missing: $SSH_KEY" >&2; exit 1; }
   local pub; pub="$(cat "$SSH_KEY")"
+  # The lab's throwaway key, generated here if absent and authorized alongside
+  # the operator key so `lab.sh ssh`/`deploy` survive a locked 1Password agent.
+  [[ -f "$SSH_PRIV" ]] || ssh-keygen -q -t ed25519 -N '' -f "$SSH_PRIV" -C litevirt-lab
+  [[ -f "$SSH_PRIV.pub" ]] || ssh-keygen -y -f "$SSH_PRIV" > "$SSH_PRIV.pub"
+  local cpub; cpub="$(cat "$SSH_PRIV.pub")"
 
   for i in $(seq 1 "$NODES"); do
     local d; d="$(nodedir "$i")"
@@ -83,15 +88,18 @@ hostname: node-$i
 fqdn: node-$i.lab
 ssh_authorized_keys:
   - $pub
+  - $cpub
 users:
   - name: ubuntu
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     ssh_authorized_keys:
       - $pub
+      - $cpub
   - name: root
     ssh_authorized_keys:
       - $pub
+      - $cpub
 disable_root: false
 package_update: true
 packages:
