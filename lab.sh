@@ -45,6 +45,9 @@ nodedir() { echo "$LAB/nodes/node-$1"; }
 natmac()  { printf '52:54:00:77:00:%02x' "$1"; }
 lanmac()  { printf '52:54:00:77:01:%02x' "$1"; }
 
+# Verbs take explicit node numbers ("up 3 5"); with none given, act on 1..NODES.
+nodes_arg() { [[ $# -gt 0 ]] && echo "$@" || seq 1 "$NODES"; }
+
 # ── image ───────────────────────────────────────────────────────────────────
 image() {
   [[ -f "$BASE" ]] && { echo "base image already present: $BASE"; return 0; }
@@ -65,7 +68,7 @@ create() {
   [[ -f "$SSH_PRIV.pub" ]] || ssh-keygen -y -f "$SSH_PRIV" > "$SSH_PRIV.pub"
   local cpub; cpub="$(cat "$SSH_PRIV.pub")"
 
-  for i in $(seq 1 "$NODES"); do
+  for i in $(nodes_arg "$@"); do
     local d; d="$(nodedir "$i")"
     mkdir -p "$d" "$LAB/seed-http/node-$i"
 
@@ -148,7 +151,7 @@ unserve() {
 # ── up ──────────────────────────────────────────────────────────────────────
 up() {
   serve
-  for i in $(seq 1 "$NODES"); do
+  for i in $(nodes_arg "$@"); do
     local d; d="$(nodedir "$i")"
     if [[ -f "$d/qemu.pid" ]] && kill -0 "$(cat "$d/qemu.pid")" 2>/dev/null; then
       echo "node-$i already running (pid $(cat "$d/qemu.pid"))"; continue
@@ -170,7 +173,7 @@ up() {
 }
 
 down() {
-  for i in $(seq 1 "$NODES"); do
+  for i in $(nodes_arg "$@"); do
     local d; d="$(nodedir "$i")"
     [[ -f "$d/qemu.pid" ]] || continue
     local pid; pid="$(cat "$d/qemu.pid")"
@@ -181,7 +184,8 @@ down() {
 
 status() {
   printf "%-8s %-8s %-14s %-22s %s\n" NODE PID IP SSH CLOUDINIT
-  for i in $(seq 1 "$NODES"); do
+  # 1..NODES plus any leftover node dirs beyond it, so strays stay visible.
+  for i in $({ seq 1 "$NODES"; ls "$LAB/nodes" 2>/dev/null | sed -n 's/^node-//p'; } | sort -nu); do
     local d pid state ci; d="$(nodedir "$i")"; pid="-"; state="down"; ci="-"
     if [[ -f "$d/qemu.pid" ]] && kill -0 "$(cat "$d/qemu.pid")" 2>/dev/null; then
       pid="$(cat "$d/qemu.pid")"; state="up"
@@ -202,7 +206,17 @@ nssh() {
       -p "$(sshport "$i")" root@127.0.0.1 "$@"
 }
 
-destroy() { down; unserve; rm -rf "$LAB/nodes"; echo "lab destroyed (base image + binary kept)"; }
+destroy() {
+  if [[ $# -gt 0 ]]; then
+    down "$@"
+    local i; for i in "$@"; do
+      rm -rf "$(nodedir "$i")" "$LAB/seed-http/node-$i"
+      echo "node-$i destroyed"
+    done
+  else
+    down; unserve; rm -rf "$LAB/nodes"; echo "lab destroyed (base image + binary kept)"
+  fi
+}
 
 # deploy [binary] — copy a litevirt binary to /usr/local/bin on every node.
 # Deliberately does NOT restart the daemons: HA fences nodes that restart too
@@ -223,13 +237,13 @@ deploy() {
 
 case "${1:-}" in
   image)  image ;;
-  create) create ;;
-  up)     up ;;
-  down)   down; unserve ;;
+  create) shift; create "$@" ;;
+  up)     shift; up "$@" ;;
+  down)   shift; if [[ $# -gt 0 ]]; then down "$@"; else down; unserve; fi ;;
   serve)  serve ;;
   status) status ;;
   ssh)    shift; nssh "$@" ;;
   deploy) shift; deploy "$@" ;;
-  destroy) destroy ;;
-  *) echo "usage: $0 {image|create|up|down|status|ssh <n> [cmd]|deploy [binary]|destroy}" >&2; exit 2 ;;
+  destroy) shift; destroy "$@" ;;
+  *) echo "usage: $0 {image|create|up|down|status|ssh <n> [cmd]|deploy [binary]|destroy} [n...]  (no numbers = all)" >&2; exit 2 ;;
 esac

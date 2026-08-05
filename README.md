@@ -31,6 +31,21 @@ Other verbs: `ssh <n> [cmd]`, `deploy [binary]` (installs to every node,
 **never restarts** — HA fences simultaneous restarts), `down`, `destroy`
 (removes node state, keeps the base image and binary).
 
+`create` / `up` / `down` / `destroy` take explicit node numbers; with none
+they act on all of `1..NODES`. So a kill/revive/replace loop is:
+
+```bash
+./lab.sh down 3            # crash just node-3 (seed server stays up)
+./lab.sh up 3              # revive it, disk intact
+./lab.sh destroy 3         # or scrap it entirely...
+./lab.sh create 3 && ./lab.sh up 3   # ...and rebuild it fresh
+NODES=5 ./lab.sh create 5 && ./lab.sh up 5   # grow the cluster
+```
+
+`status` also lists leftover node dirs beyond `NODES`, so strays stay
+visible. Removing a *joined* node still needs the cluster-side drain/remove
+first — `lab.sh` only manages the VMs.
+
 ## How it works
 
 - **Two NICs per node.** `net0` is user-mode NAT with an ssh hostfwd
