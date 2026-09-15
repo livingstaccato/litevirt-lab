@@ -13,3 +13,10 @@ seed.pid
 /cluster_key.pub
 *.pem
 *.key
+
+# Probe output — contains plaintext admin passwords
+/probes/*/evidence.txt
+/probes/*/.state/
+/probes/*/bcheck/bcheck
+/admin-seed-probe.evidence
+/.probe-original-password
