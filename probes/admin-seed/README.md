@@ -14,13 +14,19 @@ Upstream issue: [colonelpanik/litevirt#186][issue].
 an `admin` row with a current `updated_at`, and writes the plaintext to its own
 `/etc/litevirt/admin-password`. Replication then starts and publishes that row.
 
-`users` is anti-entropy-repaired and its resolver entry is `policyChain()`
-(`resolver.go:354`) — `[ruleTombstone(), ruleUnresolved(TieCategoryPolicy)]`.
-The AE lane would refuse to pick a winner and flag the conflict. But the WAL lane
-never consults it: `InsertUser` emits a plain `INSERT INTO users (...)`, whose
-ledger disposition is `DispPlainInsert`, and `replicator.go:1376` routes that to
-`applyLWWGated`. Newest `updated_at` wins outright, and the conflict is never
-surfaced as a tie.
+Nothing in the replication layer stops that row, on either lane. `users` resolves
+under `policyChain()` (`resolver.go:354`) —
+`[ruleTombstone(), ruleUnresolved(TieCategoryPolicy)]` — which reads like a
+fail-to-human guard and is not one here, because it is a **tie** chain.
+`lwwOrder` settles every non-tie conflict itself and only an exact-instant tie
+reaches `resolveTie`: `sync.go` says so outright, "Only a 0 reaches the tie
+resolver; every non-tie conflict is settled here." A freshly minted row carries a
+current `updated_at`, i.e. strictly newer, so anti-entropy applies it on
+`mergeChunk`'s `ord < 0` fall-through without ever calling the resolver, and the
+WAL lane applies it through `applyLWWGated`.
+
+So there is no conflict to surface and no alert that can fire. That is *why* the
+mint must not happen: nothing downstream is going to catch it.
 
 So the last node to start its daemon owns the cluster's admin credential, and
 every other node's password file keeps showing a password that no longer works.
