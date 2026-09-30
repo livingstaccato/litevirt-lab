@@ -94,3 +94,19 @@ export LITEVIRT_E2E=1
 export LV_BIN=$PWD/litevirt   # the binary under test
 go test ./tests/e2e/...       # from the litevirt repo
 ```
+
+## Running litevirt's tests on kvm003-f3
+
+`race-sweep.sh` runs a litevirt ref's tests on kvm003-f3 (128 cores) instead
+of the laptop. It sends the committed tree with `git archive`, so commit first.
+
+```bash
+./race-sweep.sh main                  # full -race sweep, ~65 min (grpcapi is the long pole)
+SUITE=1 ./race-sweep.sh main          # full suite without -race, ~4 min
+RUN='TestX' PKGS='./tests/fleet/' ./race-sweep.sh <ref>
+REPO=<worktree> ./race-sweep.sh <sha> # a ref from another worktree
+```
+
+It prints one summary line (`rc= ok= races= timeouts= log=`) and keeps the
+full log on kvm003. Go lives in `~/sdk/go1.26.0` there. The ssh calls use
+keepalives, so a dropped connection fails the run instead of hanging on it.
