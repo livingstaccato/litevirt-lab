@@ -27,3 +27,4 @@ seed.pid
 # Shared-storage credentials (iSCSI CHAP, ceph client keyring) — never commit
 /secrets/
 /storage/
+/storage

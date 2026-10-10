@@ -452,7 +452,9 @@ storage_up() {
     [[ -f "$d/disk.qcow2" ]] || storage_create "$r"
     local drives=() spec
     for spec in $(st_data "$r"); do
-      drives+=(-drive "file=$d/${spec%%:*}.qcow2,if=virtio,format=qcow2,serial=${spec%%:*}")
+      # serial= is a -device property: qemu 8 refuses it on -drive.
+      drives+=(-drive "file=$d/${spec%%:*}.qcow2,if=none,id=${spec%%:*},format=qcow2"
+               -device "virtio-blk-pci,drive=${spec%%:*},serial=${spec%%:*}")
     done
     qemu-system-x86_64 \
       -name "$QEMU_NAME-storage-$r" \
