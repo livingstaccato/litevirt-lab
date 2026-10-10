@@ -24,14 +24,34 @@
 set -euo pipefail
 
 LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── instance ────────────────────────────────────────────────────────────────
+# Several labs can share one host (kvm003-f3 runs lab 1 in ~/litevirt-lab and
+# lab 2 in ~/litevirt-lab2). Everything a running lab occupies on the HOST —
+# ssh hostfwd ports, the multicast cluster LAN, the seed HTTP port — plus its
+# cluster subnet, MACs and qemu process names, is the instance's identity. It
+# lives in an optional lab.env beside this script, and only there: the LAB_*
+# names are cleared first, so a value exported for one lab can never leak into
+# another lab's lab.sh and boot its nodes onto the first lab's LAN. Two labs on
+# one multicast group:port silently merge into one L2 segment, so this is the
+# value that must never be shared. With no lab.env every default is lab 1's.
+unset LAB_NODES LAB_SEEDPORT LAB_MCAST LAB_SSH_PORT_BASE LAB_LAN_PREFIX LAB_MAC_PREFIX LAB_QEMU_NAME
+# shellcheck source=/dev/null
+[[ -f "$LAB/lab.env" ]] && . "$LAB/lab.env"
+
 BASE="$LAB/images/noble-cloudimg-amd64.img"
 IMG_URL="${IMG_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
-NODES="${NODES:-4}"
+NODES="${NODES:-${LAB_NODES:-4}}"
 VCPUS="${VCPUS:-4}"
 MEM="${MEM:-3072}"
 DISK="${DISK:-40G}"
-SEEDPORT="${SEEDPORT:-8077}"
-MCAST="230.0.0.77:11877"          # the virtual cluster LAN
+# An instance's seed port is part of its identity, so lab.env beats $SEEDPORT.
+SEEDPORT="${LAB_SEEDPORT:-${SEEDPORT:-8077}}"
+MCAST="${LAB_MCAST:-230.0.0.77:11877}"          # the virtual cluster LAN
+SSH_PORT_BASE="${LAB_SSH_PORT_BASE:-2230}"      # node N's ssh is 127.0.0.1:(base+N)
+LAN_PREFIX="${LAB_LAN_PREFIX:-10.77.0}"         # node N is <prefix>.(10+N)
+MAC_PREFIX="${LAB_MAC_PREFIX:-52:54:00:77}"     # 4 octets; NICs add :00:N / :01:N
+QEMU_NAME="${LAB_QEMU_NAME:-litevirt-node}"     # qemu -name <name>-N
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519.pub}"
 # The lab's own throwaway key, generated on node-1 and authorized cluster-wide.
 # Deliberately NOT the operator's personal key: that one lives in the 1Password
@@ -39,11 +59,11 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519.pub}"
 # operation" — which reads exactly like the nodes having died.
 SSH_PRIV="${SSH_PRIV:-$LAB/cluster_key}"
 
-sshport() { echo $((2230 + $1)); }
-nodeip()  { echo "10.77.0.$((10 + $1))"; }
+sshport() { echo $((SSH_PORT_BASE + $1)); }
+nodeip()  { echo "$LAN_PREFIX.$((10 + $1))"; }
 nodedir() { echo "$LAB/nodes/node-$1"; }
-natmac()  { printf '52:54:00:77:00:%02x' "$1"; }
-lanmac()  { printf '52:54:00:77:01:%02x' "$1"; }
+natmac()  { printf "$MAC_PREFIX:00:%02x" "$1"; }
+lanmac()  { printf "$MAC_PREFIX:01:%02x" "$1"; }
 
 # Verbs take explicit node numbers ("up 3 5"); with none given, act on 1..NODES.
 nodes_arg() { [[ $# -gt 0 ]] && echo "$@" || seq 1 "$NODES"; }
@@ -157,7 +177,7 @@ up() {
       echo "node-$i already running (pid $(cat "$d/qemu.pid"))"; continue
     fi
     qemu-system-x86_64 \
-      -name "litevirt-node-$i" \
+      -name "$QEMU_NAME-$i" \
       -enable-kvm -cpu host -smp "$VCPUS" -m "$MEM" \
       -smbios "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:$SEEDPORT/node-$i/" \
       -drive file="$d/disk.qcow2",if=virtio,format=qcow2 \
@@ -193,6 +213,21 @@ status() {
     fi
     printf "%-8s %-8s %-14s %-22s %s\n" "node-$i" "$pid" "$(nodeip "$i")" "127.0.0.1:$(sshport "$i")" "$ci"
   done
+}
+
+# info — this instance's identity: everything it occupies on the host, so two
+# labs on one host can be checked for collisions before either boots.
+info() {
+  echo "lab        $LAB"
+  echo "lab.env    $([[ -f "$LAB/lab.env" ]] && echo "$LAB/lab.env" || echo "none (lab 1 defaults)")"
+  echo "nodes      $NODES"
+  echo "seed       127.0.0.1:$SEEDPORT (pid file $LAB/seed.pid)"
+  echo "mcast      $MCAST"
+  echo "ssh        127.0.0.1:$(sshport 1)..$(sshport "$NODES")"
+  echo "lan        $(nodeip 1)..$(nodeip "$NODES")/24"
+  echo "macs       $(natmac 1) (nat), $(lanmac 1) (lan) .. node $NODES"
+  echo "qemu name  $QEMU_NAME-1..$QEMU_NAME-$NODES"
+  echo "nodes dir  $(readlink -f "$LAB/nodes" 2>/dev/null || echo "$LAB/nodes")"
 }
 
 # nssh <n> [cmd...] — ssh into a node as root
@@ -242,8 +277,9 @@ case "${1:-}" in
   down)   shift; if [[ $# -gt 0 ]]; then down "$@"; else down; unserve; fi ;;
   serve)  serve ;;
   status) status ;;
+  info)   info ;;
   ssh)    shift; nssh "$@" ;;
   deploy) shift; deploy "$@" ;;
   destroy) shift; destroy "$@" ;;
-  *) echo "usage: $0 {image|create|up|down|status|ssh <n> [cmd]|deploy [binary]|destroy} [n...]  (no numbers = all)" >&2; exit 2 ;;
+  *) echo "usage: $0 {image|create|up|down|status|info|ssh <n> [cmd]|deploy [binary]|destroy} [n...]  (no numbers = all)" >&2; exit 2 ;;
 esac

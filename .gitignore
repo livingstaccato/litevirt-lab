@@ -20,3 +20,6 @@ seed.pid
 /probes/*/bcheck/bcheck
 /admin-seed-probe.evidence
 /.probe-original-password
+
+# A lab instance's identity (see lab.sh); reference copies live in instances/
+/lab.env

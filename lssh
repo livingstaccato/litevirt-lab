@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # lssh <n> [cmd...] — agent-free root ssh into lab node N (1Password-agent-proof).
+# The port base comes from the lab.env beside this script (see lab.sh), never
+# from the environment, so lssh in ~/litevirt-lab2 can only reach lab 2.
+LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+unset LAB_SSH_PORT_BASE
+# shellcheck source=/dev/null
+[[ -f "$LAB/lab.env" ]] && . "$LAB/lab.env"
 LAB_SSH_KEY="${LAB_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 n="$1"; shift
 exec ssh -i "$LAB_SSH_KEY" -o IdentityAgent=none -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  -o ConnectTimeout=5 -o LogLevel=ERROR -p "$((2230 + n))" root@127.0.0.1 "$@"
+  -o ConnectTimeout=5 -o LogLevel=ERROR -p "$((${LAB_SSH_PORT_BASE:-2230} + n))" root@127.0.0.1 "$@"

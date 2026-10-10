@@ -71,6 +71,45 @@ first — `lab.sh` only manages the VMs.
 | `LAB_SSH_KEY` | `~/.ssh/id_ed25519` | key `lssh` / `lscp` use |
 | `IMG_URL` | Ubuntu noble current | base cloud image |
 
+`./lab.sh info` prints the instance's identity (below) and everything it
+occupies on the host.
+
+## A second lab on the same host
+
+What a running lab occupies on the host — ssh hostfwd ports, the multicast
+cluster LAN, the seed HTTP port — plus its cluster subnet, MACs and qemu process
+names is the lab's *identity*. It comes from an optional `lab.env` beside
+`lab.sh`, and only from there: `lab.sh`, `lssh` and `lscp` clear the `LAB_*`
+names before reading it, so a value exported for one lab cannot leak into
+another lab's scripts. Without a `lab.env` every value is the original lab's,
+and `lab.sh` behaves exactly as before.
+
+| `lab.env` var | lab 1 default | |
+|---|---|---|
+| `LAB_NODES` | `4` | node count (`$NODES` still wins) |
+| `LAB_SEEDPORT` | `8077` | seed HTTP port (beats `$SEEDPORT`) |
+| `LAB_MCAST` | `230.0.0.77:11877` | cluster LAN. **Never share it**: two labs on one group:port silently become one L2 segment |
+| `LAB_SSH_PORT_BASE` | `2230` | node N's ssh is `127.0.0.1:(base+N)` |
+| `LAB_LAN_PREFIX` | `10.77.0` | node N is `<prefix>.(10+N)` |
+| `LAB_MAC_PREFIX` | `52:54:00:77` | NICs are `<prefix>:00:N` (NAT) and `<prefix>:01:N` (LAN) |
+| `LAB_QEMU_NAME` | `litevirt-node` | qemu `-name <name>-N` |
+
+Each lab is its own directory, with its own `cluster_key`, `nodes/`, `images/`
+and seed server. On kvm003-f3, lab 2 is `~/litevirt-lab2` with
+`instances/kvm003-lab2.env` copied to `lab.env`:
+
+```bash
+git clone <this repo> ~/litevirt-lab2 && cd ~/litevirt-lab2
+cp instances/kvm003-lab2.env lab.env
+./lab.sh info                       # check every value against the other lab first
+ssh-keygen -q -t ed25519 -N '' -f cluster_key -C litevirt-lab2
+SSH_KEY=$PWD/cluster_key.pub ./lab.sh create && ./lab.sh up
+LAB_SSH_KEY=$PWD/cluster_key ./lssh 1 hostname
+```
+
+The e2e drills find a lab by directory and port base, so pointing them at
+lab 2 is `E2E_LAB_DIR=~/litevirt-lab2 E2E_LAB_PORT_BASE=2240`.
+
 ## SSH and the 1Password agent trap
 
 All ssh here forces `-o IdentityAgent=none -o IdentitiesOnly=yes`. Without it,
