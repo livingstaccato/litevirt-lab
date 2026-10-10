@@ -191,13 +191,32 @@ unserve() {
   rm -f "$LAB/seed.pid"
 }
 
+# qemu_pid <n> — node N's qemu pid, printed only if that pid is still THIS
+# node's qemu: the `-pidfile` in its argv must resolve to this node's pid file.
+# A stale pid file whose pid the kernel has since handed to another process —
+# another lab's qemu included — matches nothing, so down never kills it and up
+# never mistakes it for a running node. Both sides are resolved (readlink -f),
+# so a lab reached through a symlinked path still recognises its own qemus,
+# while lab 2's node-1 (/mnt/vmstore/litevirt-lab2/...) can never resolve to
+# lab 1's (/mnt/vmstore/litevirt-lab/...).
+qemu_pid() {
+  local f; f="$(nodedir "$1")/qemu.pid"
+  [[ -f "$f" ]] || return 1
+  local pid; pid="$(cat "$f")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  local arg; arg="$({ tr '\0' '\n' < "/proc/$pid/cmdline"; } 2>/dev/null | grep -A1 -xF -- -pidfile | tail -1)"
+  [[ -n "$arg" && "$(readlink -f -- "$arg")" == "$(readlink -f -- "$f")" ]] || return 1
+  echo "$pid"
+}
+
 # ── up ──────────────────────────────────────────────────────────────────────
 up() {
   serve
   for i in $(nodes_arg "$@"); do
     local d; d="$(nodedir "$i")"
-    if [[ -f "$d/qemu.pid" ]] && kill -0 "$(cat "$d/qemu.pid")" 2>/dev/null; then
-      echo "node-$i already running (pid $(cat "$d/qemu.pid"))"; continue
+    local running
+    if running="$(qemu_pid "$i")"; then
+      echo "node-$i already running (pid $running)"; continue
     fi
     qemu-system-x86_64 \
       -name "$QEMU_NAME-$i" \
@@ -219,8 +238,8 @@ down() {
   for i in $(nodes_arg "$@"); do
     local d; d="$(nodedir "$i")"
     [[ -f "$d/qemu.pid" ]] || continue
-    local pid; pid="$(cat "$d/qemu.pid")"
-    if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "node-$i stopped"; fi
+    local pid
+    if pid="$(qemu_pid "$i")"; then kill "$pid"; echo "node-$i stopped"; fi
     rm -f "$d/qemu.pid"
   done
 }
@@ -230,8 +249,9 @@ status() {
   # 1..NODES plus any leftover node dirs beyond it, so strays stay visible.
   for i in $({ seq 1 "$NODES"; ls "$LAB/nodes" 2>/dev/null | sed -n 's/^node-//p'; } | sort -nu); do
     local d pid state ci; d="$(nodedir "$i")"; pid="-"; state="down"; ci="-"
-    if [[ -f "$d/qemu.pid" ]] && kill -0 "$(cat "$d/qemu.pid")" 2>/dev/null; then
-      pid="$(cat "$d/qemu.pid")"; state="up"
+    local live
+    if live="$(qemu_pid "$i")"; then
+      pid="$live"; state="up"
       ci="$(nssh "$i" 'cloud-init status 2>/dev/null | head -1' 2>/dev/null || echo unreachable)"
     fi
     printf "%-8s %-8s %-14s %-22s %s\n" "node-$i" "$pid" "$(nodeip "$i")" "127.0.0.1:$(sshport "$i")" "$ci"
