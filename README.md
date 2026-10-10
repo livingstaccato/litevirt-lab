@@ -29,7 +29,10 @@ give it a few minutes, then bootstrap the litevirt cluster per
 
 Other verbs: `ssh <n> [cmd]`, `deploy [binary]` (installs to every node,
 **never restarts** — HA fences simultaneous restarts), `down`, `destroy`
-(removes node state, keeps the base image and binary).
+(removes node state, keeps the base image and binary). With no node numbers,
+`destroy` stops and removes every `nodes/node-N` present — strays beyond
+`NODES` too — but keeps `nodes/` itself, so a `nodes` symlink to another volume
+survives and the next `create` writes there again.
 
 `create` / `up` / `down` / `destroy` take explicit node numbers; with none
 they act on all of `1..NODES`. So a kill/revive/replace loop is:

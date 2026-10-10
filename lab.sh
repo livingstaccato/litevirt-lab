@@ -292,7 +292,16 @@ destroy() {
       echo "node-$i destroyed"
     done
   else
-    down; unserve; rm -rf "$LAB/nodes"; echo "lab destroyed (base image + binary kept)"
+    # Every node dir present, strays beyond NODES included, is stopped and then
+    # removed one by one. nodes/ itself stays: on kvm003 it is a symlink to the
+    # vmstore volume, and removing it made the next create rebuild every disk on
+    # the root filesystem.
+    local all; all="$(ls "$LAB/nodes" 2>/dev/null | sed -n 's/^node-\([0-9][0-9]*\)$/\1/p' | sort -n || true)"
+    # shellcheck disable=SC2086
+    if [[ -n "$all" ]]; then down $all; fi
+    unserve
+    local i; for i in $all; do rm -rf -- "$(nodedir "$i")"; done
+    echo "lab destroyed (base image + binary kept)"
   fi
 }
 
