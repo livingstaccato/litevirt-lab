@@ -23,3 +23,7 @@ seed.pid
 
 # A lab instance's identity (see lab.sh); reference copies live in instances/
 /lab.env
+
+# Shared-storage credentials (iSCSI CHAP, ceph client keyring) — never commit
+/secrets/
+/storage/

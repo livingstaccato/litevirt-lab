@@ -36,6 +36,7 @@ LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # one multicast group:port silently merge into one L2 segment, so this is the
 # value that must never be shared. With no lab.env every default is lab 1's.
 unset LAB_NODES LAB_SEEDPORT LAB_MCAST LAB_SSH_PORT_BASE LAB_LAN_PREFIX LAB_MAC_PREFIX LAB_QEMU_NAME
+unset LAB_STORAGE_PREFIX LAB_STORAGE_SSH_PORT_BASE LAB_STORAGE_NFS_IP LAB_STORAGE_CEPH_IP
 # shellcheck source=/dev/null
 [[ -f "$LAB/lab.env" ]] && . "$LAB/lab.env"
 
@@ -199,8 +200,12 @@ unserve() {
 # so a lab reached through a symlinked path still recognises its own qemus,
 # while lab 2's node-1 (/mnt/vmstore/litevirt-lab2/...) can never resolve to
 # lab 1's (/mnt/vmstore/litevirt-lab/...).
-qemu_pid() {
-  local f; f="$(nodedir "$1")/qemu.pid"
+qemu_pid() { pidfile_pid "$(nodedir "$1")/qemu.pid"; }
+
+# pidfile_pid <pidfile> — the pid in <pidfile>, only while it is still the qemu
+# whose `-pidfile` is that file (see qemu_pid above). Storage VMs use it too.
+pidfile_pid() {
+  local f="$1"
   [[ -f "$f" ]] || return 1
   local pid; pid="$(cat "$f")"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
@@ -322,6 +327,202 @@ deploy() {
   echo "restart litevirt on each node yourself, spaced ~13s — simultaneous restarts get fenced by HA"
 }
 
+
+# ── storage VMs ─────────────────────────────────────────────────────────────
+# Non-litevirt VMs that give the lab shared storage: lab2-nfs (NFS + an iSCSI
+# LIO target) and lab2-ceph (a single-node Ceph). They are plain qemu like the
+# nodes, on the same cluster LAN (static IP), cloud-init over the same HTTP seed.
+# They are NOT litevirt hosts and never join the cluster. The services inside
+# them are provisioned by tools/*.sh (see README "Shared storage").
+#
+#   lab.sh storage up|down|status|create|destroy|ssh [nfs|ceph|<name>|all]
+#
+# Data disks carry a virtio serial, so a guest finds them at
+# /dev/disk/by-id/virtio-<serial> whatever order they enumerate in.
+STORAGE_PREFIX="${LAB_STORAGE_PREFIX:-lab}"          # VM names are <prefix>-nfs / -ceph
+STORAGE_SSH_BASE="${LAB_STORAGE_SSH_PORT_BASE:-2250}" # role index 1/2 -> base+1/+2
+STORAGE_ROLES="nfs ceph"
+
+st_idx()    { case "$1" in nfs) echo 1;; ceph) echo 2;; *) return 1;; esac; }
+st_name()   { echo "$STORAGE_PREFIX-$1"; }
+st_dir()    { echo "$LAB/storage/$(st_name "$1")"; }
+st_ip()     { case "$1" in nfs) echo "${LAB_STORAGE_NFS_IP:-$LAN_PREFIX.21}";; ceph) echo "${LAB_STORAGE_CEPH_IP:-$LAN_PREFIX.22}";; esac; }
+st_vcpus()  { case "$1" in nfs) echo 1;; ceph) echo 4;; esac; }
+st_mem()    { case "$1" in nfs) echo 2048;; ceph) echo 8192;; esac; }
+st_osdisk() { case "$1" in nfs) echo 10G;; ceph) echo 20G;; esac; }
+# serial:size pairs, in attach order
+st_data()   { case "$1" in nfs) echo "lvnfsdata:100G lviscsi:50G";; ceph) echo "lvceph0:50G lvceph1:50G lvceph2:50G";; esac; }
+st_sshport(){ echo $((STORAGE_SSH_BASE + $(st_idx "$1"))); }
+st_natmac() { printf "$MAC_PREFIX:02:%02x" "$(st_idx "$1")"; }
+st_lanmac() { printf "$MAC_PREFIX:03:%02x" "$(st_idx "$1")"; }
+st_pid()    { pidfile_pid "$(st_dir "$1")/qemu.pid"; }
+
+# st_roles <arg...> — roles named by role (nfs), full name (lab2-nfs) or all/none.
+st_roles() {
+  local a r
+  if [[ $# -eq 0 ]]; then echo $STORAGE_ROLES; return; fi
+  for a in "$@"; do
+    [[ "$a" == all ]] && { echo $STORAGE_ROLES; continue; }
+    for r in $STORAGE_ROLES; do
+      if [[ "$a" == "$r" || "$a" == "$(st_name "$r")" ]]; then echo "$r"; continue 2; fi
+    done
+    echo "unknown storage VM: $a (want nfs, ceph, $(st_name nfs), $(st_name ceph) or all)" >&2
+    exit 2
+  done
+}
+
+# st_ssh <role> [cmd...] — root ssh into a storage VM. Bounded by timeout(1) and
+# ConnectTimeout so a wedged VM fails the call instead of hanging the runner.
+st_ssh() {
+  local r="$1"; shift
+  timeout "${ST_SSH_TIMEOUT:-120}" ssh -q -i "$SSH_PRIV" -o IdentityAgent=none -o IdentitiesOnly=yes \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=10 -o LogLevel=ERROR \
+      -p "$(st_sshport "$r")" root@127.0.0.1 "$@"
+}
+
+storage_create() {
+  [[ -f "$BASE" ]] || { echo "base image missing: $BASE (run: $0 image)" >&2; exit 1; }
+  [[ -f "$SSH_KEY" ]] || { echo "ssh key missing: $SSH_KEY" >&2; exit 1; }
+  local pub; pub="$(cat "$SSH_KEY")"
+  [[ -f "$SSH_PRIV" ]] || ssh-keygen -q -t ed25519 -N '' -f "$SSH_PRIV" -C litevirt-lab
+  [[ -f "$SSH_PRIV.pub" ]] || ssh-keygen -y -f "$SSH_PRIV" > "$SSH_PRIV.pub"
+  local cpub; cpub="$(cat "$SSH_PRIV.pub")"
+  local r
+  for r in "$@"; do
+    local n d; n="$(st_name "$r")"; d="$(st_dir "$r")"
+    mkdir -p "$d" "$LAB/seed-http/$n"
+    [[ -f "$d/disk.qcow2" ]] || \
+      qemu-img create -f qcow2 -F qcow2 -b "$BASE" "$d/disk.qcow2" "$(st_osdisk "$r")" >/dev/null
+    local spec
+    for spec in $(st_data "$r"); do
+      [[ -f "$d/${spec%%:*}.qcow2" ]] || qemu-img create -f qcow2 "$d/${spec%%:*}.qcow2" "${spec##*:}" >/dev/null
+    done
+    cat > "$LAB/seed-http/$n/meta-data" <<EOF
+instance-id: litevirt-storage-$n
+local-hostname: $n
+EOF
+    # Nothing is installed here: tools/*.sh install what each role needs, so a
+    # re-run is the same as a first run. Only identity, keys and the LAN address.
+    cat > "$LAB/seed-http/$n/user-data" <<EOF
+#cloud-config
+hostname: $n
+fqdn: $n.lab
+ssh_authorized_keys:
+  - $pub
+  - $cpub
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - $pub
+      - $cpub
+  - name: root
+    ssh_authorized_keys:
+      - $pub
+      - $cpub
+disable_root: false
+write_files:
+  - path: /etc/netplan/60-cluster.yaml
+    permissions: '0600'
+    content: |
+      network:
+        version: 2
+        ethernets:
+          clusternet:
+            match:
+              macaddress: "$(st_lanmac "$r")"
+            set-name: net1
+            addresses: [$(st_ip "$r")/24]
+runcmd:
+  - [ netplan, apply ]
+  - [ sh, -c, "echo lab-ready > /var/lib/cloud/lab-ready" ]
+EOF
+    echo "$n  ip=$(st_ip "$r")  ssh=127.0.0.1:$(st_sshport "$r")  $d"
+  done
+}
+
+storage_up() {
+  serve
+  local r
+  for r in "$@"; do
+    local n d running; n="$(st_name "$r")"; d="$(st_dir "$r")"
+    if running="$(st_pid "$r")"; then echo "$n already running (pid $running)"; continue; fi
+    [[ -f "$d/disk.qcow2" ]] || storage_create "$r"
+    local drives=() spec
+    for spec in $(st_data "$r"); do
+      drives+=(-drive "file=$d/${spec%%:*}.qcow2,if=virtio,format=qcow2,serial=${spec%%:*}")
+    done
+    qemu-system-x86_64 \
+      -name "$QEMU_NAME-storage-$r" \
+      -enable-kvm -cpu host -smp "$(st_vcpus "$r")" -m "$(st_mem "$r")" \
+      -smbios "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:$SEEDPORT/$n/" \
+      -drive file="$d/disk.qcow2",if=virtio,format=qcow2 \
+      "${drives[@]}" \
+      -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$(st_sshport "$r")"-:22 \
+      -device virtio-net-pci,netdev=net0,mac="$(st_natmac "$r")" \
+      -netdev socket,id=net1,mcast="$MCAST" \
+      -device virtio-net-pci,netdev=net1,mac="$(st_lanmac "$r")" \
+      -display none -daemonize \
+      -pidfile "$d/qemu.pid" \
+      -serial file:"$d/console.log"
+    echo "$n started (pid $(cat "$d/qemu.pid"))  ip=$(st_ip "$r")  ssh 127.0.0.1:$(st_sshport "$r")"
+  done
+}
+
+# storage_down kills qemu (a power cut, not a guest shutdown); disks are kept.
+storage_down() {
+  local r pid
+  for r in "$@"; do
+    local d; d="$(st_dir "$r")"
+    [[ -f "$d/qemu.pid" ]] || continue
+    if pid="$(st_pid "$r")"; then kill "$pid"; echo "$(st_name "$r") stopped"; fi
+    rm -f "$d/qemu.pid"
+  done
+}
+
+storage_status() {
+  printf "%-12s %-8s %-14s %-22s %s\n" NAME PID IP SSH CLOUDINIT
+  local r
+  for r in "$@"; do
+    local pid="-" ci="-" live
+    if live="$(st_pid "$r")"; then
+      pid="$live"
+      ci="$(ST_SSH_TIMEOUT=20 st_ssh "$r" 'cloud-init status 2>/dev/null | head -1' 2>/dev/null || echo unreachable)"
+    fi
+    printf "%-12s %-8s %-14s %-22s %s\n" "$(st_name "$r")" "$pid" "$(st_ip "$r")" "127.0.0.1:$(st_sshport "$r")" "$ci"
+  done
+}
+
+storage_destroy() {
+  storage_down "$@"
+  local r; for r in "$@"; do
+    rm -rf -- "$(st_dir "$r")" "$LAB/seed-http/$(st_name "$r")"
+    echo "$(st_name "$r") destroyed"
+  done
+}
+
+storage_cmd() {
+  local verb="${1:-}"; shift || true
+  if [[ "$verb" == ssh ]]; then   # lab.sh storage ssh <role> [cmd...]  (one VM, not a list)
+    local r; r="$(st_roles "${1:-}")" || exit $?
+    [[ $# -gt 0 ]] && shift
+    st_ssh "$r" "$@"; return
+  fi
+  local roles; roles="$(st_roles "$@")" || exit $?
+  # shellcheck disable=SC2086
+  set -- $roles
+  case "$verb" in
+    create)  storage_create "$@" ;;
+    up)      storage_up "$@" ;;
+    down)    storage_down "$@" ;;
+    status)  storage_status "$@" ;;
+    destroy) storage_destroy "$@" ;;
+    *) echo "usage: $0 storage {up|down|status|create|destroy} [nfs|ceph|<name>|all]   |   $0 storage ssh <nfs|ceph> [cmd]" >&2; exit 2 ;;
+  esac
+}
+
 case "${1:-}" in
   image)  image ;;
   create) shift; create "$@" ;;
@@ -332,6 +533,7 @@ case "${1:-}" in
   info)   info ;;
   ssh)    shift; nssh "$@" ;;
   deploy) shift; deploy "$@" ;;
+  storage) shift; storage_cmd "$@" ;;
   destroy) shift; destroy "$@" ;;
-  *) echo "usage: $0 {image|create|up|down|status|info|ssh <n> [cmd]|deploy [binary]|destroy} [n...]  (no numbers = all)" >&2; exit 2 ;;
+  *) echo "usage: $0 {image|create|up|down|status|info|ssh <n> [cmd]|deploy [binary]|destroy|storage ...} [n...]  (no numbers = all)" >&2; exit 2 ;;
 esac
