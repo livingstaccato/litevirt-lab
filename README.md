@@ -181,6 +181,13 @@ the restricted Ceph key `ceph.client.litevirt.keyring` (0600, caps
 `mon 'profile rbd'`, `osd 'profile rbd pool=lv'`). The Ceph admin keyring never
 leaves `lab2-ceph`. Nodes get `ceph.conf` and the restricted keyring only.
 
+Ceph on one host: `tools/ceph.sh` puts pool `lv` on CRUSH rule `lv_osd`, whose
+failure domain is **osd**, not host, so the three OSDs on the single `lab2-ceph`
+VM hold all 3 replicas (size 3, min_size 2). It tolerates the loss of one disk,
+not of the VM: this is a lab cluster, not a model of a production layout. The
+bootstrap pins the container image to the VM's own `ceph --version`, because a
+newer squid image mints keys the distro 19.2.3 client cannot parse.
+
 Pool details worth knowing: litevirt pools are per host, so each pool is created
 once per node with `--host node-N`; the iSCSI portal is given as `ip:3260` (the
 driver builds the by-path name from it verbatim); an iSCSI pool hands every disk
