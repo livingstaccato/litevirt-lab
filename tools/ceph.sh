@@ -33,8 +33,12 @@ missing=(); for p in "${pkgs[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=(
 if [[ ${#missing[@]} -gt 0 ]]; then apt-get update -qq; apt-get install -y -qq "${missing[@]}"; fi
 systemctl enable --now chrony >/dev/null 2>&1 || true
 
+# The container image must match the distro ceph-common that the VM's CLI and
+# the nodes' clients run: a newer squid point release (cephadm's default
+# :v19 tag) mints keys the 19.2.3 client cannot parse ("Malformed input").
+VER="$(ceph --version | awk '{print $3}')"
 if ! { [[ -f /etc/ceph/ceph.client.admin.keyring ]] && timeout 60 ceph -s >/dev/null 2>&1; }; then
-  cephadm bootstrap --mon-ip "$IP" --single-host-defaults \
+  cephadm --image "quay.io/ceph/ceph:v$VER" bootstrap --mon-ip "$IP" --single-host-defaults \
     --skip-monitoring-stack --skip-dashboard --skip-firewalld
 fi
 
