@@ -460,7 +460,8 @@ storage_up() {
       -name "$QEMU_NAME-storage-$r" \
       -enable-kvm -cpu host -smp "$(st_vcpus "$r")" -m "$(st_mem "$r")" \
       -smbios "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:$SEEDPORT/$n/" \
-      -drive file="$d/disk.qcow2",if=virtio,format=qcow2 \
+      -drive file="$d/disk.qcow2",if=none,id=osdisk,format=qcow2 \
+      -device virtio-blk-pci,drive=osdisk,bootindex=0 \
       "${drives[@]}" \
       -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$(st_sshport "$r")"-:22 \
       -device virtio-net-pci,netdev=net0,mac="$(st_natmac "$r")" \
