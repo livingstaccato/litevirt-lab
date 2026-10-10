@@ -154,17 +154,40 @@ EOF
   done
 }
 
+# seed_pids — the pids of THIS instance's seed server, and only its. A process
+# qualifies when its argv is `... -m http.server <SEEDPORT> ...` AND its cwd is
+# this lab's seed-http dir: the port and the directory are both per-instance, so
+# another lab's server (or anything else on the host) can never match. Found by
+# scanning /proc rather than trusting seed.pid, because seed.pid written by the
+# old serve() held the backgrounded wrapper shell's pid, not python's, and a
+# server orphaned that way (still listening, wrapper long gone) has no pid file
+# pointing at it at all.
+seed_pids() {
+  local want p
+  want="$(cd "$LAB/seed-http" 2>/dev/null && pwd -P)" || return 0
+  for p in /proc/[0-9]*; do
+    [[ "$(readlink "$p/cwd" 2>/dev/null)" == "$want" ]] || continue
+    tr '\0' ' ' < "$p/cmdline" 2>/dev/null | grep -qF -- "-m http.server $SEEDPORT " || continue
+    echo "${p#/proc/}"
+  done
+}
+
 serve() {
-  [[ -f "$LAB/seed.pid" ]] && kill -0 "$(cat "$LAB/seed.pid")" 2>/dev/null && return 0
-  ( cd "$LAB/seed-http" && nohup python3 -m http.server "$SEEDPORT" --bind 127.0.0.1 \
-      >"$LAB/seed-http.log" 2>&1 & echo $! > "$LAB/seed.pid" )
+  local running; running="$(seed_pids | head -1)"
+  if [[ -n "$running" ]]; then echo "$running" > "$LAB/seed.pid"; return 0; fi
+  # exec, so the backgrounded subshell BECOMES python and $! is the server's own
+  # pid; stdin from /dev/null, so a remote `ssh host lab.sh up` is not held open
+  # by the server inheriting the session.
+  ( cd "$LAB/seed-http" && exec nohup python3 -m http.server "$SEEDPORT" --bind 127.0.0.1 \
+      >"$LAB/seed-http.log" 2>&1 </dev/null ) &
+  echo $! > "$LAB/seed.pid"
   sleep 1
   echo "seed server on 127.0.0.1:$SEEDPORT (guests reach it at 10.0.2.2:$SEEDPORT)"
 }
 
 unserve() {
-  [[ -f "$LAB/seed.pid" ]] || return 0
-  kill "$(cat "$LAB/seed.pid")" 2>/dev/null || true
+  local p
+  for p in $(seed_pids); do kill "$p" 2>/dev/null && echo "seed server stopped (pid $p)"; done
   rm -f "$LAB/seed.pid"
 }
 
