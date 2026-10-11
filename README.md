@@ -214,6 +214,59 @@ A `cut` left in place survives until `heal` (or a node reboot).
 `./lab.sh storage down` powers the VMs off (disks kept); `./lab.sh storage destroy`
 removes their disks. Pools are removed with `litevirt pool delete <name> --host node-N`.
 
+## Lab extras (lab 1): hardware, networks, BMCs, identity, mail
+
+All opt-in through `lab.env` (`instances/kvm003-lab1.env` is lab 1's); an
+instance that sets none of it boots exactly as before. `./lab.sh info` lists
+what an instance has turned on.
+
+| Extra | lab.env | Inside the node |
+|---|---|---|
+| q35 + intel-iommu (caching-mode, intremap), igb NIC with SR-IOV (`sriov0`, 2 VFs at boot), NVMe disk (`lvnvme0`, SMART), spare virtio disk (`lvspare0` = `/dev/vdb`), xhci + USB tablet/keyboard | `LAB_NODE_HW=1`, `LAB_NODE_HW_NODES`, `LAB_IGB_MCAST` | `intel_iommu=on iommu=pt`; `lab-sriov-vfs.service` |
+| migration network NIC `mignet`, `<LAB_MIG_PREFIX>.(10+N)/24` | `LAB_MIG_MCAST`, `LAB_MIG_PREFIX` | netplan `61-lab-extras.yaml` |
+| VLAN trunk NIC `trunk0` (no address; tagged frames pass between nodes) | `LAB_TRUNK_MCAST` | netplan |
+| ULA on the cluster NIC (guest/firewall tests only; litevirt's transport stays IPv4) | `LAB_LAN6_PREFIX` | netplan `60-cluster.yaml` |
+| legacy cgroup v1 hierarchy | `LAB_CGROUP_V1_NODES` | `systemd.unified_cgroup_hierarchy=0` |
+| per-node memory, QMP socket | `LAB_NODE_MEM`, `LAB_NODE_QMP=1` | — |
+| helper VMs `bmc`, `idm` on the LAN | `LAB_AUX_ROLES`, `LAB_AUX_SSH_PORT_BASE`, `LAB_BMC_*`, `LAB_IDM_*` | — |
+
+Order on a running lab (kvm003, `cd ~/litevirt-lab; export LAB_SSH_KEY=$PWD/cluster_key`):
+
+```bash
+tools/node-extras.sh                  # guest side: grub, netplan, VF unit, packages (nothing applied live)
+tools/node-cycle.sh N                 # one node at a time: ACPI off, boot on the new qemu options,
+                                      # wait for a stable HOST_ACTIVE; fencing held at manual meanwhile
+CHECK=1 tools/node-extras.sh          # read-only: IOMMU groups, VFs, spare disk, SMART, USB, cgroup v1
+
+./lab.sh aux up                       # bmc + idm VMs (aux/ is a symlink to /mnt/vmstore, like nodes/)
+tools/lab-ca.sh init && tools/lab-ca.sh trust
+tools/bmc.sh secrets && tools/bmc.sh agent start && tools/bmc.sh provision && tools/bmc.sh nodes
+tools/bmc.sh check
+tools/idm.sh provision && tools/idm.sh nodes && tools/idm.sh check
+```
+
+**Never cycle a node with plain `lab.sh down/up` while its fence strategy is ssh
+or best-effort.** A coordinator that saw it offline SSH-powers it off again as
+soon as its sshd answers (~25 s into each boot), every boot. `node-cycle.sh`
+holds the strategy at `manual` until the node has read HOST_ACTIVE for 120 s.
+
+**BMCs.** The `bmc` VM runs an `ipmi_sim` per node at `<lan>.(40+N):623`
+(lanplus; user/password in `secrets/bmc/ipmi.env`) and a sushy-tools Redfish
+service at `https://<LAB_BMC_IP>:8000` (basic auth, `secrets/bmc/redfish.env`;
+systems `node-N`). Both act through `tools/bmc-agent.py`, the only process that
+touches a node's qemu: it runs on the lab host as the lab user, listens on
+127.0.0.1 only (guests reach it at 10.0.2.2), needs `secrets/bmc/agent-token`,
+refuses nodes outside `LAB_BMC_NODES`, and logs to `bmc-agent.log`. It is not
+started by `lab.sh up`: `tools/bmc.sh agent start` after a host reboot.
+On every node, `lab-host-power <node-N> on|off|cycle|soft|status` powers a node
+through its BMC (for litevirt's `E2E_HOST_DOWN_CMD` / `E2E_HOST_UP_CMD`).
+
+**Identity and mail.** The `idm` VM runs kanidm (`https://idm.lab:8443`, OIDC
+issuer `https://idm.lab:8443/oauth2/openid/litevirt`, client `litevirt`) and
+Mailpit (SMTP `<LAB_IDM_IP>:1025`, web/API `:8025`). Test users lvadmin,
+lvoper, lvview and lvmfa (MFA required: password + TOTP); credentials in
+`secrets/idm/`. `tools/idm.sh token <user>` prints a real ID token's claims.
+
 ## SSH and the 1Password agent trap
 
 All ssh here forces `-o IdentityAgent=none -o IdentitiesOnly=yes`. Without it,
