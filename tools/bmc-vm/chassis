@@ -1,0 +1,43 @@
+#!/bin/sh
+# chassis <node> get|set|check [parm [val]]... — ipmi_sim's chassis_control hook
+# for one lab node (lan.conf: chassis_control "/usr/local/lib/lab-bmc/chassis N").
+#
+# ipmi_sim appends the operation and its parameters, as in OpenIPMI's
+# ipmi_sim_chassiscontrol example:
+#   get power            -> prints "power:1" or "power:0"
+#   set power 1|0        -> power on | power cut
+#   set reset 1          -> warm reset (same qemu process)
+#   set shutdown 1       -> ACPI power button (soft off)
+#   set boot <v>         -> accepted, ignored (the lab always boots its disk)
+# Everything goes through labpower.py to the lab host's agent; a failure prints
+# its reason and exits 1, which ipmi_sim reports to the IPMI client.
+node="$1"; shift
+op="$1"; shift
+lp=/usr/local/lib/lab-bmc/labpower.py
+log() { logger -t "lab-bmc-node-$node" "$*"; }
+case "$op" in
+  get)
+    for parm in "$@"; do
+      case "$parm" in
+        power) s=$("$lp" "$node" get) || exit 1
+               [ "$s" = on ] && echo "power:1" || echo "power:0" ;;
+        boot)  echo "boot:none" ;;
+        *)     echo "Invalid parameter: $parm"; exit 1 ;;
+      esac
+    done ;;
+  set)
+    while [ $# -gt 0 ]; do
+      parm="$1"; val="$2"; shift 2 || { echo "No value for $parm"; exit 1; }
+      case "$parm" in
+        power)    if [ "$val" = 1 ]; then act=on; else act=off; fi ;;
+        reset)    [ "$val" = 1 ] || continue; act=reset ;;
+        shutdown) [ "$val" = 1 ] || continue; act=soft ;;
+        boot|identify) continue ;;
+        *)        echo "Invalid parameter: $parm"; exit 1 ;;
+      esac
+      log "chassis $parm=$val -> $act"
+      "$lp" "$node" "$act" >/dev/null || { echo "power agent refused $act"; exit 1; }
+    done ;;
+  check) exit 0 ;;
+  *) echo "Invalid operation: $op"; exit 1 ;;
+esac

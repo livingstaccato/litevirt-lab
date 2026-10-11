@@ -28,3 +28,10 @@ seed.pid
 /secrets/
 /storage/
 /storage
+
+# Helper VMs (lab.sh aux): disks and the BMC power agent's runtime files
+/aux
+/aux/
+/bmc-agent.pid
+/bmc-agent.log
+/bmc-agent.log.stderr

@@ -1,0 +1,38 @@
+#!/bin/sh
+# lab-host-power <node-N|N> on|off|cycle|soft|reset|status — power a lab node
+# through its simulated BMC over IPMI (lanplus), the way a real fence would.
+# Installed on every lab node by tools/bmc.sh nodes; credentials come from
+# /etc/lab-bmc/ipmi.env (0600) and go to ipmitool through the environment (-E),
+# never argv.
+#
+# For litevirt's e2e suite, run on a node (local mode):
+#   E2E_HOST_DOWN_CMD='lab-host-power {host} off'
+#   E2E_HOST_UP_CMD='lab-host-power {host} on'
+# `off` returns once the BMC reports the chassis off; `on` once it reports it on
+# (the node then boots; litevirt is up about 30-40 s later).
+set -eu
+[ $# -eq 2 ] || { echo "usage: lab-host-power <node-N|N> on|off|cycle|soft|reset|status" >&2; exit 2; }
+. /etc/lab-bmc/ipmi.env
+n="${1#node-}"
+case "$n" in ''|*[!0-9]*) echo "not a lab node: $1" >&2; exit 2 ;; esac
+case " $BMC_NODES " in *" $n "*) ;; *) echo "node-$n has no BMC (BMC_NODES=$BMC_NODES)" >&2; exit 2 ;; esac
+bmc="$BMC_PREFIX.$((BMC_BASE + n))"
+ipmi() { IPMI_PASSWORD="$IPMI_PASS" IPMITOOL_PASSWORD="$IPMI_PASS" ipmitool -I lanplus -H "$bmc" -U "$IPMI_USER" -E -N 2 -R 3 "$@"; }
+want=""
+case "$2" in
+  status) ipmi chassis power status; exit $? ;;
+  on)     ipmi chassis power on; want=on ;;
+  off)    ipmi chassis power off; want=off ;;
+  cycle)  ipmi chassis power cycle; want=on ;;
+  soft)   ipmi chassis power soft; want=off ;;
+  reset)  ipmi chassis power reset; exit $? ;;
+  *) echo "unknown action $2" >&2; exit 2 ;;
+esac
+# Wait (up to 4 min, for a soft off) until the BMC reports the wanted state.
+i=0
+while [ $i -lt 120 ]; do
+  ipmi chassis power status 2>/dev/null | grep -qi "is $want\$" && { echo "node-$n: chassis power $want (BMC $bmc)"; exit 0; }
+  i=$((i + 1)); sleep 2
+done
+echo "node-$n: BMC $bmc never reported power $want" >&2
+exit 1
