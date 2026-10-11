@@ -37,6 +37,12 @@ LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # value that must never be shared. With no lab.env every default is lab 1's.
 unset LAB_NODES LAB_SEEDPORT LAB_MCAST LAB_SSH_PORT_BASE LAB_LAN_PREFIX LAB_MAC_PREFIX LAB_QEMU_NAME
 unset LAB_STORAGE_PREFIX LAB_STORAGE_SSH_PORT_BASE LAB_STORAGE_NFS_IP LAB_STORAGE_CEPH_IP
+# Opt-in node hardware, extra networks and aux VMs (see "lab extras" below and
+# the README). Every one is off unless the instance's lab.env sets it.
+unset LAB_NODE_HW LAB_NODE_HW_NODES LAB_NODE_MEM LAB_NODE_QMP LAB_IGB_MCAST \
+      LAB_MIG_MCAST LAB_MIG_PREFIX LAB_TRUNK_MCAST LAB_LAN6_PREFIX LAB_CGROUP_V1_NODES \
+      LAB_AUX_ROLES LAB_AUX_SSH_PORT_BASE LAB_BMC_IP LAB_BMC_IPMI_BASE LAB_BMC_NODES \
+      LAB_BMC_AGENT_PORT LAB_IDM_IP LAB_IDM_DOMAIN
 # shellcheck source=/dev/null
 [[ -f "$LAB/lab.env" ]] && . "$LAB/lab.env"
 
@@ -68,6 +74,144 @@ lanmac()  { printf "$MAC_PREFIX:01:%02x" "$1"; }
 
 # Verbs take explicit node numbers ("up 3 5"); with none given, act on 1..NODES.
 nodes_arg() { [[ $# -gt 0 ]] && echo "$@" || seq 1 "$NODES"; }
+
+# ── lab extras (all opt-in through lab.env) ─────────────────────────────────
+# With none of these set, every qemu argv and every seed file is exactly what it
+# was before they existed, so an instance that does not opt in (lab 2) is
+# unchanged.
+#
+#   LAB_NODE_MEM="1:5120 3:4096"   per-node memory, overriding $MEM
+#   LAB_NODE_QMP=1                 a QMP socket per node (nodes/node-N/qmp.sock), so
+#                                  the BMC simulators can ask for an ACPI shutdown
+#   LAB_NODE_HW=1                  emulated hardware on the nodes: q35 + intel-iommu
+#                                  (caching-mode, intremap), an igb NIC with SR-IOV on
+#                                  its own segment, an xhci controller with a USB
+#                                  tablet + keyboard, an NVMe disk (SMART), and a
+#                                  spare virtio disk (serial lvspare0)
+#   LAB_NODE_HW_NODES="1 2"        ...only on these nodes (default: every node)
+#   LAB_IGB_MCAST=g:p              the igb NIC's segment (needed with LAB_NODE_HW)
+#   LAB_MIG_MCAST=g:p              a migration network NIC per node (set-name mignet)
+#   LAB_MIG_PREFIX=10.77.1         ...node N is <prefix>.(10+N)/24
+#   LAB_TRUNK_MCAST=g:p            a VLAN trunk NIC per node (set-name trunk0, no IP)
+#   LAB_LAN6_PREFIX=fd00:77::      a ULA on the cluster NIC: node N is <prefix><10+N>/64
+#                                  (guest/firewall tests only: litevirt's cluster
+#                                  transport and advertise_address stay IPv4)
+#   LAB_CGROUP_V1_NODES="2"        read by tools/node-extras.sh, which boots these
+#                                  nodes with the legacy (v1) cgroup hierarchy
+node_mem() {
+  local kv
+  for kv in ${LAB_NODE_MEM:-}; do [[ "${kv%%:*}" == "$1" ]] && { echo "${kv#*:}"; return; }; done
+  echo "$MEM"
+}
+node_hw() {
+  [[ "${LAB_NODE_HW:-0}" == 1 ]] || return 1
+  [[ -z "${LAB_NODE_HW_NODES:-}" || " $LAB_NODE_HW_NODES " == *" $1 "* ]]
+}
+migmac()   { printf "$MAC_PREFIX:04:%02x" "$1"; }
+trunkmac() { printf "$MAC_PREFIX:05:%02x" "$1"; }
+igbmac()   { printf "$MAC_PREFIX:06:%02x" "$1"; }
+migip()    { echo "${LAB_MIG_PREFIX:-}.$((10 + $1))"; }
+lan6ip()   { echo "${LAB_LAN6_PREFIX:-}$((10 + $1))"; }
+
+# node_qemu_extras <n> — fill the arrays ex_pre (machine, IOMMU), ex_disk (OS +
+# extra disks + USB; empty = the classic if=virtio drive), ex_net (extra NICs)
+# and ex_tail (QMP) for node N. All empty unless opted in.
+node_qemu_extras() {
+  local i="$1" d; d="$(nodedir "$i")"
+  ex_pre=(); ex_disk=(); ex_net=(); ex_tail=()
+  if node_hw "$i"; then
+    [[ -n "${LAB_IGB_MCAST:-}" ]] || { echo "LAB_NODE_HW=1 needs LAB_IGB_MCAST in lab.env" >&2; exit 2; }
+    # intel-iommu must precede the PCI devices it translates for; intremap needs
+    # the split irqchip; caching-mode lets a vfio user inside the node (an L2
+    # guest given a VF) work against an emulated IOMMU.
+    ex_pre=(-machine q35,kernel-irqchip=split
+            -device intel-iommu,intremap=on,caching-mode=on)
+    [[ -f "$d/nvme0.qcow2" ]]  || qemu-img create -f qcow2 "$d/nvme0.qcow2" 8G >/dev/null
+    [[ -f "$d/spare0.qcow2" ]] || qemu-img create -f qcow2 "$d/spare0.qcow2" 4G >/dev/null
+    # The OS disk keeps bootindex 0: SeaBIOS boots only the first disk it finds,
+    # and a blank NVMe or spare disk ahead of it is an empty console.
+    ex_disk=(-drive file="$d/disk.qcow2",if=none,id=osdisk,format=qcow2
+             -device virtio-blk-pci,drive=osdisk,bootindex=0
+             -drive file="$d/spare0.qcow2",if=none,id=spare0,format=qcow2
+             -device virtio-blk-pci,drive=spare0,serial=lvspare0
+             -drive file="$d/nvme0.qcow2",if=none,id=nvme0,format=qcow2
+             -device nvme,drive=nvme0,serial=lvnvme0
+             -device qemu-xhci,id=xhci
+             -device usb-tablet,bus=xhci.0
+             -device usb-kbd,bus=xhci.0)
+    # igb (82576) behind its own root port: the PF exposes SR-IOV, the node makes
+    # VFs with sriov_numvfs, and each VF is an assignable PCI function.
+    ex_net+=(-device pcie-root-port,id=rp-igb,chassis=10,slot=10
+             -netdev socket,id=net4,mcast="$LAB_IGB_MCAST"
+             -device igb,bus=rp-igb,netdev=net4,mac="$(igbmac "$i")")
+  fi
+  if [[ -n "${LAB_MIG_MCAST:-}" ]]; then
+    ex_net+=(-netdev socket,id=net2,mcast="$LAB_MIG_MCAST"
+             -device virtio-net-pci,netdev=net2,mac="$(migmac "$i")")
+  fi
+  if [[ -n "${LAB_TRUNK_MCAST:-}" ]]; then
+    ex_net+=(-netdev socket,id=net3,mcast="$LAB_TRUNK_MCAST"
+             -device virtio-net-pci,netdev=net3,mac="$(trunkmac "$i")")
+  fi
+  if [[ "${LAB_NODE_QMP:-0}" == 1 ]]; then
+    ex_tail=(-qmp unix:"$d/qmp.sock",server=on,wait=off)
+  fi
+}
+
+# netplan_extras <n> — the netplan document for node N's extra NICs, or nothing
+# when no extra network is configured. Matched by MAC, like the cluster NIC.
+netplan_extras() {
+  local i="$1" out=""
+  if [[ -n "${LAB_MIG_MCAST:-}" ]]; then
+    [[ -n "${LAB_MIG_PREFIX:-}" ]] || { echo "LAB_MIG_MCAST needs LAB_MIG_PREFIX" >&2; exit 2; }
+    out+="    mignet:
+      match:
+        macaddress: \"$(migmac "$i")\"
+      set-name: mignet
+      addresses: [$(migip "$i")/24]
+"
+  fi
+  if [[ -n "${LAB_TRUNK_MCAST:-}" ]]; then
+    out+="    trunk0:
+      match:
+        macaddress: \"$(trunkmac "$i")\"
+      set-name: trunk0
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+      link-local: []
+"
+  fi
+  if node_hw "$i"; then
+    out+="    sriov0:
+      match:
+        macaddress: \"$(igbmac "$i")\"
+      set-name: sriov0
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+      link-local: []
+"
+  fi
+  [[ -n "$out" ]] || return 0
+  printf 'network:\n  version: 2\n  ethernets:\n%s' "$out"
+}
+
+# lan_addresses <n> — the cluster NIC's address list (plus the ULA when set).
+lan_addresses() {
+  if [[ -n "${LAB_LAN6_PREFIX:-}" ]]; then echo "[$(nodeip "$1")/24, \"$(lan6ip "$1")/64\"]"
+  else echo "[$(nodeip "$1")/24]"; fi
+}
+
+# extras_write_file <n> — a cloud-init write_files entry for netplan_extras,
+# starting with a newline so it can follow the previous line directly, or
+# nothing at all (so a lab without extras gets byte-identical user-data).
+extras_write_file() {
+  local doc; doc="$(netplan_extras "$1")"
+  [[ -n "$doc" ]] || return 0
+  printf "\n  - path: /etc/netplan/61-lab-extras.yaml\n    permissions: '0600'\n    content: |\n"
+  printf '%s\n' "$doc" | sed 's/^/      /'
+}
 
 # ── image ───────────────────────────────────────────────────────────────────
 image() {
@@ -145,7 +289,7 @@ write_files:
             match:
               macaddress: "$(lanmac "$i")"
             set-name: net1
-            addresses: [$(nodeip "$i")/24]
+            addresses: $(lan_addresses "$i")$(extras_write_file "$i")
 runcmd:
   - [ netplan, apply ]
   - [ systemctl, enable, --now, libvirtd ]
@@ -223,15 +367,24 @@ up() {
     if running="$(qemu_pid "$i")"; then
       echo "node-$i already running (pid $running)"; continue
     fi
+    # Opt-in extras (lab.env); every array is empty without them, so the argv is
+    # the classic one.
+    local ex_pre ex_disk ex_net ex_tail
+    node_qemu_extras "$i"
+    local disk=(-drive file="$d/disk.qcow2",if=virtio,format=qcow2)
+    [[ ${#ex_disk[@]} -gt 0 ]] && disk=("${ex_disk[@]}")
     qemu-system-x86_64 \
       -name "$QEMU_NAME-$i" \
-      -enable-kvm -cpu host -smp "$VCPUS" -m "$MEM" \
+      -enable-kvm -cpu host -smp "$VCPUS" -m "$(node_mem "$i")" \
+      "${ex_pre[@]}" \
       -smbios "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:$SEEDPORT/node-$i/" \
-      -drive file="$d/disk.qcow2",if=virtio,format=qcow2 \
+      "${disk[@]}" \
       -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$(sshport "$i")-:22 \
       -device virtio-net-pci,netdev=net0,mac=$(natmac "$i") \
       -netdev socket,id=net1,mcast="$MCAST" \
       -device virtio-net-pci,netdev=net1,mac=$(lanmac "$i") \
+      "${ex_net[@]}" \
+      "${ex_tail[@]}" \
       -display none -daemonize \
       -pidfile "$d/qemu.pid" \
       -serial file:"$d/console.log"
@@ -276,6 +429,21 @@ info() {
   echo "macs       $(natmac 1) (nat), $(lanmac 1) (lan) .. node $NODES"
   echo "qemu name  $QEMU_NAME-1..$QEMU_NAME-$NODES"
   echo "nodes dir  $(readlink -f "$LAB/nodes" 2>/dev/null || echo "$LAB/nodes")"
+  # Extras are listed only when this instance opts in to them.
+  [[ -n "${LAB_NODE_MEM:-}" ]]   && echo "node mem   $LAB_NODE_MEM (others $MEM)"
+  [[ "${LAB_NODE_QMP:-0}" == 1 ]] && echo "qmp        nodes/node-N/qmp.sock"
+  [[ "${LAB_NODE_HW:-0}" == 1 ]] && echo "node hw    q35+intel-iommu, igb ($LAB_IGB_MCAST, $(igbmac 1)..), nvme, spare disk, xhci  on: ${LAB_NODE_HW_NODES:-all}"
+  [[ -n "${LAB_MIG_MCAST:-}" ]]  && echo "migration  $LAB_MIG_MCAST  $(migip 1)..$(migip "$NODES")/24  macs $(migmac 1).."
+  [[ -n "${LAB_TRUNK_MCAST:-}" ]] && echo "trunk      $LAB_TRUNK_MCAST  macs $(trunkmac 1).."
+  [[ -n "${LAB_LAN6_PREFIX:-}" ]] && echo "lan ipv6   $(lan6ip 1)..$(lan6ip "$NODES")/64"
+  [[ -n "${LAB_CGROUP_V1_NODES:-}" ]] && echo "cgroup v1  nodes $LAB_CGROUP_V1_NODES"
+  if [[ -n "${LAB_AUX_ROLES:-}" ]]; then
+    local r; for r in $LAB_AUX_ROLES; do
+      echo "aux $r    $(aux_ip "$r")  ssh 127.0.0.1:$(aux_sshport "$r")  macs $(aux_natmac "$r")/$(aux_lanmac "$r")  qemu $QEMU_NAME-aux-$r"
+    done
+  fi
+  [[ -n "${LAB_BMC_AGENT_PORT:-}" ]] && echo "bmc agent  127.0.0.1:$LAB_BMC_AGENT_PORT (guests: 10.0.2.2:$LAB_BMC_AGENT_PORT)"
+  return 0
 }
 
 # nssh <n> [cmd...] — ssh into a node as root
@@ -526,6 +694,184 @@ storage_cmd() {
   esac
 }
 
+# ── aux VMs (opt-in: LAB_AUX_ROLES) ─────────────────────────────────────────
+# Non-litevirt helper VMs on the cluster LAN, built like the storage VMs above:
+#
+#   bmc  simulated BMCs for every node — one ipmi_sim (OpenIPMI lanserv) per node
+#        on its own LAN address (LAB_BMC_IPMI_BASE+N, UDP 623) and a sushy-tools
+#        Redfish service (LAB_BMC_IP:8000). They power nodes through the host-side
+#        power agent (tools/bmc-agent.py), which runs lab.sh up/down. Provisioned
+#        by tools/bmc.sh.
+#   idm  kanidm (OIDC provider) and Mailpit (SMTP sink), provisioned by tools/idm.sh.
+#
+#   lab.sh aux up|down|status|create|destroy [bmc|idm|all]   |   lab.sh aux ssh <role> [cmd]
+#
+# Disk files live in aux/<role>/ (symlink aux/ to /mnt/vmstore first, like nodes/).
+AUX_ROLES="${LAB_AUX_ROLES:-}"
+AUX_SSH_BASE="${LAB_AUX_SSH_PORT_BASE:-2260}"
+aux_idx()    { case "$1" in bmc) echo 1;; idm) echo 2;; *) return 1;; esac; }
+aux_dir()    { echo "$LAB/aux/$1"; }
+aux_ip()     { case "$1" in bmc) echo "${LAB_BMC_IP:-$LAN_PREFIX.40}";; idm) echo "${LAB_IDM_IP:-$LAN_PREFIX.50}";; esac; }
+aux_vcpus()  { case "$1" in bmc) echo 1;; idm) echo 2;; esac; }
+aux_mem()    { case "$1" in bmc) echo 1024;; idm) echo 2048;; esac; }
+aux_osdisk() { case "$1" in bmc) echo 8G;; idm) echo 16G;; esac; }
+aux_sshport(){ echo $((AUX_SSH_BASE + $(aux_idx "$1"))); }
+aux_natmac() { printf "$MAC_PREFIX:07:%02x" "$(aux_idx "$1")"; }
+aux_lanmac() { printf "$MAC_PREFIX:08:%02x" "$(aux_idx "$1")"; }
+aux_pid()    { pidfile_pid "$(aux_dir "$1")/qemu.pid"; }
+
+# aux_roles <arg...> — enabled roles named, or all of them; refuses a role the
+# instance did not enable, so lab 2 cannot boot lab 1's helpers by accident.
+aux_roles() {
+  [[ -n "$AUX_ROLES" ]] || { echo "no aux VMs enabled for this lab (set LAB_AUX_ROLES in lab.env)" >&2; exit 2; }
+  if [[ $# -eq 0 ]]; then echo $AUX_ROLES; return; fi
+  local a
+  for a in "$@"; do
+    [[ "$a" == all ]] && { echo $AUX_ROLES; continue; }
+    [[ " $AUX_ROLES " == *" $a "* ]] || { echo "aux VM $a not enabled (LAB_AUX_ROLES=\"$AUX_ROLES\")" >&2; exit 2; }
+    echo "$a"
+  done
+}
+
+aux_ssh() {
+  local r="$1"; shift
+  timeout "${AUX_SSH_TIMEOUT:-120}" ssh -q -i "$SSH_PRIV" -o IdentityAgent=none -o IdentitiesOnly=yes \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=10 -o LogLevel=ERROR \
+      -p "$(aux_sshport "$r")" root@127.0.0.1 "$@"
+}
+
+aux_create() {
+  [[ -f "$BASE" ]] || { echo "base image missing: $BASE (run: $0 image)" >&2; exit 1; }
+  [[ -f "$SSH_KEY" ]] || { echo "ssh key missing: $SSH_KEY" >&2; exit 1; }
+  local pub; pub="$(cat "$SSH_KEY")"
+  [[ -f "$SSH_PRIV" ]] || ssh-keygen -q -t ed25519 -N '' -f "$SSH_PRIV" -C litevirt-lab
+  [[ -f "$SSH_PRIV.pub" ]] || ssh-keygen -y -f "$SSH_PRIV" > "$SSH_PRIV.pub"
+  local cpub; cpub="$(cat "$SSH_PRIV.pub")"
+  local r
+  for r in "$@"; do
+    local d; d="$(aux_dir "$r")"
+    mkdir -p "$d" "$LAB/seed-http/aux-$r"
+    [[ -f "$d/disk.qcow2" ]] || \
+      qemu-img create -f qcow2 -F qcow2 -b "$BASE" "$d/disk.qcow2" "$(aux_osdisk "$r")" >/dev/null
+    cat > "$LAB/seed-http/aux-$r/meta-data" <<EOF
+instance-id: litevirt-aux-$r
+local-hostname: $r
+EOF
+    cat > "$LAB/seed-http/aux-$r/user-data" <<EOF
+#cloud-config
+hostname: $r
+fqdn: $r.lab
+ssh_authorized_keys:
+  - $pub
+  - $cpub
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - $pub
+      - $cpub
+  - name: root
+    ssh_authorized_keys:
+      - $pub
+      - $cpub
+disable_root: false
+write_files:
+  - path: /etc/netplan/60-cluster.yaml
+    permissions: '0600'
+    content: |
+      network:
+        version: 2
+        ethernets:
+          clusternet:
+            match:
+              macaddress: "$(aux_lanmac "$r")"
+            set-name: net1
+            addresses: [$(aux_ip "$r")/24]
+runcmd:
+  - [ netplan, apply ]
+  - [ sh, -c, "echo lab-ready > /var/lib/cloud/lab-ready" ]
+EOF
+    echo "aux-$r  ip=$(aux_ip "$r")  ssh=127.0.0.1:$(aux_sshport "$r")  $d"
+  done
+}
+
+aux_up() {
+  serve
+  local r
+  for r in "$@"; do
+    local d running; d="$(aux_dir "$r")"
+    if running="$(aux_pid "$r")"; then echo "aux-$r already running (pid $running)"; continue; fi
+    [[ -f "$d/disk.qcow2" ]] || aux_create "$r"
+    qemu-system-x86_64 \
+      -name "$QEMU_NAME-aux-$r" \
+      -enable-kvm -cpu host -smp "$(aux_vcpus "$r")" -m "$(aux_mem "$r")" \
+      -smbios "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:$SEEDPORT/aux-$r/" \
+      -drive file="$d/disk.qcow2",if=none,id=osdisk,format=qcow2 \
+      -device virtio-blk-pci,drive=osdisk,bootindex=0 \
+      -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$(aux_sshport "$r")"-:22 \
+      -device virtio-net-pci,netdev=net0,mac="$(aux_natmac "$r")" \
+      -netdev socket,id=net1,mcast="$MCAST" \
+      -device virtio-net-pci,netdev=net1,mac="$(aux_lanmac "$r")" \
+      -display none -daemonize \
+      -pidfile "$d/qemu.pid" \
+      -serial file:"$d/console.log"
+    echo "aux-$r started (pid $(cat "$d/qemu.pid"))  ip=$(aux_ip "$r")  ssh 127.0.0.1:$(aux_sshport "$r")"
+  done
+}
+
+aux_down() {
+  local r pid
+  for r in "$@"; do
+    local d; d="$(aux_dir "$r")"
+    [[ -f "$d/qemu.pid" ]] || continue
+    if pid="$(aux_pid "$r")"; then kill "$pid"; echo "aux-$r stopped"; fi
+    rm -f "$d/qemu.pid"
+  done
+}
+
+aux_status() {
+  printf "%-10s %-8s %-14s %-22s %s\n" NAME PID IP SSH CLOUDINIT
+  local r
+  for r in "$@"; do
+    local pid="-" ci="-" live
+    if live="$(aux_pid "$r")"; then
+      pid="$live"
+      ci="$(AUX_SSH_TIMEOUT=20 aux_ssh "$r" 'cloud-init status 2>/dev/null | head -1' 2>/dev/null || echo unreachable)"
+    fi
+    printf "%-10s %-8s %-14s %-22s %s\n" "aux-$r" "$pid" "$(aux_ip "$r")" "127.0.0.1:$(aux_sshport "$r")" "$ci"
+  done
+}
+
+aux_destroy() {
+  aux_down "$@"
+  local r; for r in "$@"; do
+    rm -rf -- "$(aux_dir "$r")" "$LAB/seed-http/aux-$r"
+    echo "aux-$r destroyed"
+  done
+}
+
+aux_cmd() {
+  local verb="${1:-}"; shift || true
+  if [[ "$verb" == ssh ]]; then
+    local r; r="$(aux_roles "${1:?usage: $0 aux ssh <role> [cmd]}")" || exit $?
+    shift
+    aux_ssh "$r" "$@"; return
+  fi
+  local roles; roles="$(aux_roles "$@")" || exit $?
+  # shellcheck disable=SC2086
+  set -- $roles
+  case "$verb" in
+    create)  aux_create "$@" ;;
+    up)      aux_up "$@" ;;
+    down)    aux_down "$@" ;;
+    status)  aux_status "$@" ;;
+    destroy) aux_destroy "$@" ;;
+    *) echo "usage: $0 aux {up|down|status|create|destroy} [bmc|idm|all]   |   $0 aux ssh <role> [cmd]" >&2; exit 2 ;;
+  esac
+}
+
 case "${1:-}" in
   image)  image ;;
   create) shift; create "$@" ;;
@@ -534,9 +880,12 @@ case "${1:-}" in
   serve)  serve ;;
   status) status ;;
   info)   info ;;
+  pid)    shift; qemu_pid "${1:?usage: $0 pid <n>}" ;;
+  netplan-extras) shift; netplan_extras "${1:?usage: $0 netplan-extras <n>}" ;;
   ssh)    shift; nssh "$@" ;;
   deploy) shift; deploy "$@" ;;
   storage) shift; storage_cmd "$@" ;;
+  aux)    shift; aux_cmd "$@" ;;
   destroy) shift; destroy "$@" ;;
-  *) echo "usage: $0 {image|create|up|down|status|info|ssh <n> [cmd]|deploy [binary]|destroy|storage ...} [n...]  (no numbers = all)" >&2; exit 2 ;;
+  *) echo "usage: $0 {image|create|up|down|status|info|ssh <n> [cmd]|deploy [binary]|destroy|storage ...|aux ...|pid <n>|netplan-extras <n>} [n...]  (no numbers = all)" >&2; exit 2 ;;
 esac
