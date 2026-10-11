@@ -25,7 +25,6 @@ via="${2:-}"; [[ -n "$via" ]] || { via=1; [[ "$n" == 1 ]] && via=2; }
 qmp="$(readlink -f "$LAB/nodes")/node-$n/qmp.sock"
 
 old="$("$LAB/lab.sh" pid "$n" || true)"
-[[ -n "$old" ]] || die "node-$n is not running"
 strategy="$(SSH_TIMEOUT=20 nodessh "$via" "litevirt host inspect node-$n" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("fenceStrategy",""))')"
 [[ -n "$strategy" ]] || die "cannot read node-$n's fence strategy through node-$via"
 restore() {
@@ -39,10 +38,13 @@ if [[ "$strategy" != manual ]]; then
     die "cannot set node-$n's fence strategy to manual"
   echo "node-$n: fence strategy $strategy -> manual for the cycle"
 fi
-say "node-$n: shutdown (qemu pid $old) at $(date -u +%T)"
-if [[ -S "$qmp" ]]; then
+if [[ -z "$old" ]]; then
+  say "node-$n: already off; just booting it"
+elif [[ -S "$qmp" ]]; then
+  say "node-$n: shutdown (qemu pid $old) at $(date -u +%T)"
   python3 -I "$LAB/tools/qmp.py" "$qmp" system_powerdown >/dev/null
 else
+  say "node-$n: shutdown (qemu pid $old) at $(date -u +%T)"
   SSH_TIMEOUT=20 nodessh "$n" 'systemctl poweroff' || true
 fi
 for _ in $(seq 1 120); do "$LAB/lab.sh" pid "$n" >/dev/null || break; sleep 2; done
@@ -59,11 +61,23 @@ for _ in $(seq 1 60); do
   [[ "$(SSH_TIMEOUT=10 nodessh "$n" 'systemctl is-active litevirt' 2>/dev/null)" == active ]] && break; sleep 5
 done
 say "node-$n: ssh up, litevirt $(SSH_TIMEOUT=10 nodessh "$n" 'systemctl is-active litevirt' 2>/dev/null) at $(date -u +%T)"
-state=""
-for _ in $(seq 1 72); do
-  state="$(SSH_TIMEOUT=20 nodessh "$via" "litevirt host ls 2>/dev/null | awk '\$1==\"node-$n\"{print \$3}'" 2>/dev/null || true)"
-  [[ "$state" == HOST_ACTIVE ]] && break; sleep 5
+# A HOST_ACTIVE read straight after a quick reboot can be the cluster's view
+# from BEFORE it noticed the node go: the coordinator may only now be deciding
+# to fence it. So the node must read HOST_ACTIVE continuously for STABLE_SECS
+# (default 120) before the fence strategy is restored.
+hs() { SSH_TIMEOUT=20 nodessh "$via" "litevirt host ls 2>/dev/null | awk '\$1==\"node-$n\"{print \$3}'" 2>/dev/null || true; }
+state=""; since=0
+for _ in $(seq 1 120); do
+  state="$(hs)"
+  if [[ "$state" == HOST_ACTIVE ]]; then
+    [[ $since -gt 0 ]] || since=$(date +%s)
+    (( $(date +%s) - since >= ${STABLE_SECS:-120} )) && break
+  else
+    since=0
+  fi
+  sleep 5
 done
+"$LAB/lab.sh" pid "$n" >/dev/null || { state="qemu gone (powered off during the wait: fenced?)"; }
 SSH_TIMEOUT=20 nodessh "$via" 'litevirt host ls' || true
 fails=0
 [[ "$state" == HOST_ACTIVE ]] || { echo "FAIL: node-$n is '$state' on node-$via 6 min after boot"; fails=1; }
