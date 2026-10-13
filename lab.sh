@@ -6,7 +6,8 @@
 # this host). Two NICs per node:
 #
 #   net0  user-mode NAT + hostfwd  -> outbound apt, and ssh from the host
-#   net1  qemu multicast socket    -> the 10.77.0.0/24 cluster LAN between nodes
+#   net1  a lanhub LAN (qemu dgram) -> the 10.77.0.0/24 cluster LAN between nodes
+#         (or a qemu multicast socket with LAB_NET_MODE=mcast; see "virtual LANs")
 #
 # cloud-init is seeded over HTTP, pointed at by the SMBIOS DMI product serial
 # (`ds=nocloud-net;s=http://10.0.2.2:PORT/node-N/`), which ds-identify detects
@@ -35,6 +36,10 @@ LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # another lab's lab.sh and boot its nodes onto the first lab's LAN. Two labs on
 # one multicast group:port silently merge into one L2 segment, so this is the
 # value that must never be shared. With no lab.env every default is lab 1's.
+# LAB_NET_MODE is the one exception: an exported value beats lab.env, so the
+# multicast rollback is one variable (see "virtual LANs").
+_LAB_NET_MODE_ENV="${LAB_NET_MODE:-}"
+unset LAB_NET_MODE
 unset LAB_NODES LAB_SEEDPORT LAB_MCAST LAB_SSH_PORT_BASE LAB_LAN_PREFIX LAB_MAC_PREFIX LAB_QEMU_NAME
 unset LAB_STORAGE_PREFIX LAB_STORAGE_SSH_PORT_BASE LAB_STORAGE_NFS_IP LAB_STORAGE_CEPH_IP
 # Opt-in node hardware, extra networks and aux VMs (see "lab extras" below and
@@ -74,6 +79,185 @@ lanmac()  { printf "$MAC_PREFIX:01:%02x" "$1"; }
 
 # Verbs take explicit node numbers ("up 3 5"); with none given, act on 1..NODES.
 nodes_arg() { [[ $# -gt 0 ]] && echo "$@" || seq 1 "$NODES"; }
+
+# ── virtual LANs: a user-space hub (default) or host multicast (rollback) ───
+# Every LAN the VMs share — the cluster LAN, plus the opt-in migration, trunk and igb segments — is one of
+# two things, picked by LAB_NET_MODE:
+#
+#   hub    (default) one lanhub process per LAN (source in lanhub/): a learning
+#          Ethernet hub on Unix datagram sockets. Each VM NIC is a qemu
+#          `-netdev dgram` whose local socket is hub/<lan>/peers/<vm>.sock and
+#          whose remote is hub/<lan>/hub.sock. Nothing leaves the host: the LAN
+#          is sockets in this lab's directory, so two labs cannot merge into
+#          one segment either.
+#   mcast  the original `-netdev socket,mcast=<group:port>`. Every frame then
+#          leaves the host as UDP multicast on its default-route interface — on
+#          kvm003-f3 that is bond0.209, the physical VLAN 209 — so this is the
+#          rollback only.
+#
+# The environment wins over lab.env, so a rollback is one variable
+# (`LAB_NET_MODE=mcast ./lab.sh up`); otherwise lab.env, otherwise hub. In hub
+# mode a *_MCAST value only switches its network on; its group:port is unused.
+# One lab must never run VMs in both modes at once: a hub NIC and a multicast
+# NIC cannot hear each other, so the lab would split in two. Starting a VM in
+# one mode while any of the lab's VMs runs in the other is refused.
+#
+# Each hub runs under a restart loop (back within ~0.5 s if lanhub exits),
+# detached like the VMs (setsid nohup, parent pid 1), so it survives the ssh
+# session that started it. Pid files and logs are in hub/<lan>/.
+#
+#   lab.sh hub status [-v]     loop/hub pids, peers, frame counters (-v: per peer)
+#   lab.sh hub up | down [lan...]   start / stop hubs (down refuses while VMs run)
+NET_MODE="${_LAB_NET_MODE_ENV:-${LAB_NET_MODE:-hub}}"
+case "$NET_MODE" in
+  hub|mcast) ;;
+  *) echo "LAB_NET_MODE must be hub or mcast, not '$NET_MODE'" >&2; exit 2 ;;
+esac
+HUB_DIR="$LAB/hub"
+LANHUB="$LAB/lanhub/lanhub"
+
+# lab_lans — the LANs this instance's VMs are on.
+lab_lans() {
+  local l=cluster
+  [[ -n "${LAB_MIG_MCAST:-}" ]] && l+=" mig"
+  [[ -n "${LAB_TRUNK_MCAST:-}" ]] && l+=" trunk"
+  [[ "${LAB_NODE_HW:-0}" == 1 && -n "${LAB_IGB_MCAST:-}" ]] && l+=" igb"
+  echo "$l"
+}
+
+# lab_vm_pids — every running qemu of this lab: nodes (strays too), storage, aux.
+lab_vm_pids() {
+  local i r
+  for i in $({ seq 1 "$NODES"; ls "$LAB/nodes" 2>/dev/null | sed -n 's/^node-\([0-9][0-9]*\)$/\1/p'; } | sort -nu); do
+    qemu_pid "$i" || true
+  done
+  for r in $STORAGE_ROLES; do st_pid "$r" || true; done
+  for r in $AUX_ROLES; do aux_pid "$r" || true; done
+}
+
+# lan_netdev <id> <lan> <group:port> <vm> — the -netdev value for one VM NIC.
+lan_netdev() {
+  if [[ "$NET_MODE" == mcast ]]; then echo "socket,id=$1,mcast=$3"; return; fi
+  echo "dgram,id=$1,local.type=unix,local.path=$HUB_DIR/$2/peers/$4.sock,remote.type=unix,remote.path=$HUB_DIR/$2/hub.sock"
+}
+
+# proc_args <pid> — the process's argv, one per line; fails if it is gone.
+proc_args() { { tr '\0' '\n' < "/proc/$1/cmdline"; } 2>/dev/null; }
+
+# hub_sup_pid / hub_pid <lan> — the LAN's restart loop / its lanhub, printed
+# only while the pid in the pid file is still that process (its argv names this
+# LAN's directory), so a recycled pid is never taken for a hub.
+hub_sup_pid() {
+  local d="$HUB_DIR/$1" pid args
+  pid="$(cat "$d/supervisor.pid" 2>/dev/null)" && [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  args="$(proc_args "$pid")" || return 1
+  grep -qxF lanhub-supervisor <<<"$args" && grep -qxF -- "$d" <<<"$args" || return 1
+  echo "$pid"
+}
+hub_pid() {
+  local d="$HUB_DIR/$1" pid args
+  pid="$(cat "$d/hub.pid" 2>/dev/null)" && [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  args="$(proc_args "$pid")" || return 1
+  grep -qxF -- "$d/hub.sock" <<<"$args" || return 1
+  echo "$pid"
+}
+
+hub_build() {
+  local go; go="$(command -v go || echo "$HOME/sdk/go1.26.0/bin/go")"
+  [[ -x "$go" ]] || { echo "$LANHUB missing and no go toolchain to build it" >&2; exit 1; }
+  (cd "$LAB/lanhub" && CGO_ENABLED=0 "$go" build -trimpath -o lanhub .)
+  echo "built $LANHUB"
+}
+
+# hub_ensure <lan> — start the LAN's hub unless its loop already runs.
+hub_ensure() {
+  local lan="$1" d="$HUB_DIR/$1" pid
+  hub_sup_pid "$lan" >/dev/null && return 0
+  [[ -x "$LANHUB" ]] || hub_build
+  mkdir -p "$d/peers"
+  chmod 700 "$HUB_DIR" "$d"   # the LAN is these sockets: only the lab user may join it
+  # A lanhub whose loop was killed still serves; replace it, not run two.
+  if pid="$(hub_pid "$lan")"; then kill "$pid" 2>/dev/null || true; fi
+  rm -f "$d/hub.pid"
+  # shellcheck disable=SC2016  # expanded by the loop's own shell
+  setsid nohup bash -c '
+    echo $$ > "$2/supervisor.pid"
+    while :; do
+      "$1" -sock "$2/hub.sock" -pidfile "$2/hub.pid"
+      echo "lanhub-supervisor[$$]: lanhub exited with status $? at $(date -u +%FT%TZ); restarting"
+      sleep 0.5
+    done' lanhub-supervisor "$LANHUB" "$d" >>"$d/hub.log" 2>&1 </dev/null &
+  local _
+  for _ in $(seq 1 50); do
+    if hub_sup_pid "$lan" >/dev/null && hub_pid "$lan" >/dev/null && [[ -S "$d/hub.sock" ]]; then
+      echo "hub $lan started (loop pid $(hub_sup_pid "$lan"), lanhub pid $(hub_pid "$lan"))"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "hub $lan did not come up; see $d/hub.log" >&2
+  exit 1
+}
+
+# hubs_up [lan...] — every hub this lab needs (in hub mode), before any VM boots.
+hubs_up() {
+  [[ "$NET_MODE" == hub ]] || return 0
+  local lan lans=("$@")
+  [[ ${#lans[@]} -gt 0 ]] || read -ra lans <<<"$(lab_lans)"
+  for lan in "${lans[@]}"; do hub_ensure "$lan"; done
+}
+
+hubs_down() {
+  local running; running="$(lab_vm_pids | head -1)"
+  if [[ -n "$running" && "${FORCE:-0}" != 1 ]]; then
+    echo "refusing: lab VMs are running (qemu pid $running) and would lose their LANs; stop them first, or FORCE=1" >&2
+    exit 2
+  fi
+  local lan pid lans=("$@")
+  [[ ${#lans[@]} -gt 0 ]] || read -ra lans <<<"$(lab_lans)"
+  for lan in "${lans[@]}"; do
+    if pid="$(hub_sup_pid "$lan")"; then kill "$pid"; fi   # the loop first, or it restarts the hub
+    if pid="$(hub_pid "$lan")"; then kill "$pid"; fi
+    rm -f "$HUB_DIR/$lan/supervisor.pid" "$HUB_DIR/$lan/hub.pid"
+    echo "hub $lan stopped"
+  done
+}
+
+# hubs_status [-v] — one row per LAN from the hub's stats file (rewritten every
+# second); -v adds a row per peer (one per VM NIC: frames in, out, dropped).
+hubs_status() {
+  local verbose=0; [[ "${1:-}" == -v ]] && verbose=1
+  echo "net mode $NET_MODE  ($HUB_DIR)"
+  printf "%-8s %-8s %-5s %-8s %-5s %-6s %-5s %-10s %-10s %-9s %-9s %-9s %s\n" \
+    LAN LOOP PPID LANHUB PPID PEERS MACS RX_FRAMES FLOODED UNICAST DROP_FULL DROP_GONE UPDATED
+  local lan
+  for lan in $( { lab_lans | tr ' ' '\n'; ls "$HUB_DIR" 2>/dev/null; } | awk '!seen[$0]++'); do
+    [[ -d "$HUB_DIR/$lan" ]] || { printf "%-8s %s\n" "$lan" "(no hub dir)"; continue; }
+    local sup="-" sppid="-" hub="-" hppid="-" p f="$HUB_DIR/$lan/stats"
+    if p="$(hub_sup_pid "$lan")"; then sup="$p"; sppid="$(ps -o ppid= -p "$p" | tr -d ' ')"; fi
+    if p="$(hub_pid "$lan")"; then hub="$p"; hppid="$(ps -o ppid= -p "$p" | tr -d ' ')"; fi
+    st() { awk -v k="$1" '$1==k{print $2}' "$f" 2>/dev/null || true; }
+    printf "%-8s %-8s %-5s %-8s %-5s %-6s %-5s %-10s %-10s %-9s %-9s %-9s %s\n" "$lan" "$sup" "$sppid" "$hub" "$hppid" \
+      "$(st peers)" "$(st macs)" "$(st rx_frames)" "$(st flooded)" "$(st unicast)" "$(st drop_full)" "$(st drop_gone)" "$(st updated)"
+    [[ $verbose == 1 && -f "$f" ]] && sed -n 's/^peer /    /p' "$f"
+  done
+  return 0
+}
+
+# net_mode_guard — refuse to start a VM in one mode while any of this lab's
+# VMs runs in the other (see above: the lab would split in two).
+net_mode_guard() {
+  local pid args other=""
+  for pid in $(lab_vm_pids); do
+    args="$(proc_args "$pid")" || continue
+    if [[ "$NET_MODE" == hub && "$args" == *",mcast="* ]]; then other=mcast; break; fi
+    if [[ "$NET_MODE" == mcast && "$args" == *"remote.type=unix"* ]]; then other=hub; break; fi
+  done
+  [[ -z "$other" ]] && return 0
+  echo "refusing: qemu pid $pid of this lab runs with LAB_NET_MODE=$other; a $NET_MODE NIC cannot reach it," >&2
+  echo "so the lab would split in two. Stop the lab's VMs first, or run with LAB_NET_MODE=$other." >&2
+  exit 2
+}
 
 # ── lab extras (all opt-in through lab.env) ─────────────────────────────────
 # With none of these set, every qemu argv and every seed file is exactly what it
@@ -142,15 +326,15 @@ node_qemu_extras() {
     # igb (82576) behind its own root port: the PF exposes SR-IOV, the node makes
     # VFs with sriov_numvfs, and each VF is an assignable PCI function.
     ex_net+=(-device pcie-root-port,id=rp-igb,chassis=10,slot=10
-             -netdev socket,id=net4,mcast="$LAB_IGB_MCAST"
+             -netdev "$(lan_netdev net4 igb "$LAB_IGB_MCAST" "node-$i")"
              -device igb,bus=rp-igb,netdev=net4,mac="$(igbmac "$i")")
   fi
   if [[ -n "${LAB_MIG_MCAST:-}" ]]; then
-    ex_net+=(-netdev socket,id=net2,mcast="$LAB_MIG_MCAST"
+    ex_net+=(-netdev "$(lan_netdev net2 mig "$LAB_MIG_MCAST" "node-$i")"
              -device virtio-net-pci,netdev=net2,mac="$(migmac "$i")")
   fi
   if [[ -n "${LAB_TRUNK_MCAST:-}" ]]; then
-    ex_net+=(-netdev socket,id=net3,mcast="$LAB_TRUNK_MCAST"
+    ex_net+=(-netdev "$(lan_netdev net3 trunk "$LAB_TRUNK_MCAST" "node-$i")"
              -device virtio-net-pci,netdev=net3,mac="$(trunkmac "$i")")
   fi
   if [[ "${LAB_NODE_QMP:-0}" == 1 ]]; then
@@ -360,6 +544,8 @@ pidfile_pid() {
 
 # ── up ──────────────────────────────────────────────────────────────────────
 up() {
+  net_mode_guard
+  hubs_up                  # every LAN up before any VM boots onto it
   serve
   for i in $(nodes_arg "$@"); do
     local d; d="$(nodedir "$i")"
@@ -381,7 +567,7 @@ up() {
       "${disk[@]}" \
       -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$(sshport "$i")-:22 \
       -device virtio-net-pci,netdev=net0,mac=$(natmac "$i") \
-      -netdev socket,id=net1,mcast="$MCAST" \
+      -netdev "$(lan_netdev net1 cluster "$MCAST" "node-$i")" \
       -device virtio-net-pci,netdev=net1,mac=$(lanmac "$i") \
       "${ex_net[@]}" \
       "${ex_tail[@]}" \
@@ -423,7 +609,8 @@ info() {
   echo "lab.env    $([[ -f "$LAB/lab.env" ]] && echo "$LAB/lab.env" || echo "none (lab 1 defaults)")"
   echo "nodes      $NODES"
   echo "seed       127.0.0.1:$SEEDPORT (pid file $LAB/seed.pid)"
-  echo "mcast      $MCAST"
+  echo "net mode   $NET_MODE  (LANs: $(lab_lans); hubs in $HUB_DIR)"
+  echo "mcast      $MCAST$([[ "$NET_MODE" == mcast ]] || echo "  (unused: LAB_NET_MODE=mcast only)")"
   echo "ssh        127.0.0.1:$(sshport 1)..$(sshport "$NODES")"
   echo "lan        $(nodeip 1)..$(nodeip "$NODES")/24"
   echo "macs       $(natmac 1) (nat), $(lanmac 1) (lan) .. node $NODES"
@@ -612,6 +799,8 @@ EOF
 }
 
 storage_up() {
+  net_mode_guard
+  hubs_up cluster
   serve
   local r
   for r in "$@"; do
@@ -633,7 +822,7 @@ storage_up() {
       "${drives[@]}" \
       -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$(st_sshport "$r")"-:22 \
       -device virtio-net-pci,netdev=net0,mac="$(st_natmac "$r")" \
-      -netdev socket,id=net1,mcast="$MCAST" \
+      -netdev "$(lan_netdev net1 cluster "$MCAST" "$n")" \
       -device virtio-net-pci,netdev=net1,mac="$(st_lanmac "$r")" \
       -display none -daemonize \
       -pidfile "$d/qemu.pid" \
@@ -798,6 +987,8 @@ EOF
 }
 
 aux_up() {
+  net_mode_guard
+  hubs_up cluster
   serve
   local r
   for r in "$@"; do
@@ -812,7 +1003,7 @@ aux_up() {
       -device virtio-blk-pci,drive=osdisk,bootindex=0 \
       -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$(aux_sshport "$r")"-:22 \
       -device virtio-net-pci,netdev=net0,mac="$(aux_natmac "$r")" \
-      -netdev socket,id=net1,mcast="$MCAST" \
+      -netdev "$(lan_netdev net1 cluster "$MCAST" "aux-$r")" \
       -device virtio-net-pci,netdev=net1,mac="$(aux_lanmac "$r")" \
       -display none -daemonize \
       -pidfile "$d/qemu.pid" \
@@ -886,6 +1077,13 @@ case "${1:-}" in
   deploy) shift; deploy "$@" ;;
   storage) shift; storage_cmd "$@" ;;
   aux)    shift; aux_cmd "$@" ;;
+  hub)    shift; case "${1:-status}" in
+            status) shift || true; hubs_status "$@" ;;
+            up)     shift; NET_MODE=hub; hubs_up "$@" ;;
+            down)   shift; hubs_down "$@" ;;
+            *) echo "usage: $0 hub {status [-v]|up [lan...]|down [lan...]}" >&2; exit 2 ;;
+          esac ;;
+  hub-status) shift; hubs_status "$@" ;;
   destroy) shift; destroy "$@" ;;
-  *) echo "usage: $0 {image|create|up|down|status|info|ssh <n> [cmd]|deploy [binary]|destroy|storage ...|aux ...|pid <n>|netplan-extras <n>} [n...]  (no numbers = all)" >&2; exit 2 ;;
+  *) echo "usage: $0 {image|create|up|down|status|info|ssh <n> [cmd]|deploy [binary]|destroy|storage ...|aux ...|hub ...|hub-status|pid <n>|netplan-extras <n>} [n...]  (no numbers = all)" >&2; exit 2 ;;
 esac

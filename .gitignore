@@ -35,3 +35,7 @@ seed.pid
 /bmc-agent.pid
 /bmc-agent.log
 /bmc-agent.log.stderr
+
+# Virtual LAN hubs (lab.sh "virtual LANs"): sockets, pid files, logs, stats
+/hub/
+/lanhub/lanhub

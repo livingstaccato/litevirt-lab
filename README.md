@@ -52,8 +52,9 @@ first — `lab.sh` only manages the VMs.
 ## How it works
 
 - **Two NICs per node.** `net0` is user-mode NAT with an ssh hostfwd
-  (`127.0.0.1:2230+N`); `net1` is a qemu multicast socket forming the
-  `10.77.0.0/24` cluster LAN (node N is `10.77.0.10+N`).
+  (`127.0.0.1:2230+N`); `net1` is a qemu `dgram` socket on the cluster LAN's
+  lanhub, forming the `10.77.0.0/24` cluster LAN (node N is `10.77.0.10+N`).
+  See "Virtual LANs" below: nothing of the LAN leaves the host.
 - **cloud-init over HTTP, not a seed disk.** The SMBIOS DMI serial carries
   `ds=nocloud-net;s=http://10.0.2.2:PORT/node-N/`. A VVFAT seed disk silently
   fails: the synthesized FAT volume has no `CIDATA` blkid label, so
@@ -61,6 +62,64 @@ first — `lab.sh` only manages the VMs.
 - **The cluster NIC is configured via a netplan file in user-data**, not
   cloud-init `network-config` — the HTTP NoCloud datasource never fetches
   `network-config`, so serving one is silently ignored.
+
+## Virtual LANs: lanhub (default) or multicast (rollback)
+
+Every LAN the VMs share — the cluster LAN, plus lab 1's migration, trunk and
+igb segments — is a **lanhub**: a small learning Ethernet hub on Unix datagram
+sockets (`lanhub/`, Go, one process per LAN). Each VM NIC is a qemu
+`-netdev dgram` whose local socket is `hub/<lan>/peers/<vm>.sock` and whose
+remote is `hub/<lan>/hub.sock`. Nothing leaves the host.
+
+Why: the old `-netdev socket,mcast=…` NICs had no `localaddr`, so the kernel
+joined the groups on the default-route interface. On kvm003-f3 that is
+`bond0.209`, so every lab frame — gossip, gRPC, replication, migrations, NFS,
+iSCSI and Ceph — went out onto the physical VLAN 209 as UDP multicast. `lo`
+has no MULTICAST flag (and changing it is a host config change), so
+`localaddr=127.0.0.1` was not an option.
+
+| | |
+|---|---|
+| mode | `LAB_NET_MODE=hub` (default) or `mcast`. The environment wins over `lab.env`, so rollback is one variable |
+| hubs | `lab.sh up`, `storage up` and `aux up` start the hubs they need **before** any VM, idempotently |
+| supervision | each hub runs under a restart loop (back within ~0.5 s if lanhub exits), detached with `setsid nohup` like the VMs (parent pid 1), so it outlives the ssh session. No systemd: kvm003 has `Linger=no` |
+| files | `hub/<lan>/hub.sock`, `peers/`, `supervisor.pid`, `hub.pid`, `hub.log`, `stats` (rewritten every second). `hub/` is 0700: only the lab user can join a LAN |
+| status | `./lab.sh hub status [-v]` (alias `hub-status`): loop and hub pids with parents, peers, MACs, frame counters; `-v` adds one row per VM NIC |
+| stop | `./lab.sh hub down [lan…]` refuses while any of the lab's VMs runs (`FORCE=1` overrides) |
+| isolation | two labs are separate directories, so they can never merge into one segment, whatever `*_MCAST` says. In hub mode a `*_MCAST` value only switches its network on |
+
+What the hub does: it learns which peer a source MAC lives behind (MACs age
+out after 2 min), sends a frame for a learned MAC to that peer only, and floods
+broadcast, multicast and unknown unicast to every other peer, never back to the
+sender. Every socket in `peers/` is a peer from the moment it exists, so a NIC
+that never speaks first (the trunk, the igb PF) still receives floods. Sends
+never block: each peer has its own send socket and `MSG_DONTWAIT`, so a VM that
+is booting or paused (not reading) or stopped (stale socket file) loses only
+its own frames (`drop_full` / `drop_gone`). Buffers take 128 KiB datagrams, so
+jumbo frames pass. `cd lanhub && go test ./...` covers learning, flooding,
+no-echo, ageing and a stuck/dead peer over real sockets. `lab.sh` builds
+`lanhub/lanhub` with `~/sdk/go1.26.0` if the binary is missing.
+
+**Never mix modes in one lab.** A hub NIC and a multicast NIC cannot hear
+each other, so a lab with VMs in both is split in two (and its nodes fence each
+other). `lab.sh` refuses to start a VM in one mode while any of the lab's VMs
+runs in the other. Switching modes is therefore a whole-lab restart:
+
+```bash
+# rollback to multicast (frames go back onto the host VLAN)
+#   stop every VM of the lab cleanly (ACPI / systemctl poweroff), then:
+LAB_NET_MODE=mcast ./lab.sh up          # lab 2: LAB_NET_MODE=mcast ./lab.sh storage up first
+LAB_NET_MODE=mcast ./lab.sh aux up      # lab 1 helpers
+./lab.sh hub down                       # optional, once nothing uses the hubs
+```
+
+Hold the fence strategy at `manual` across a whole-lab restart, as
+`tools/node-cycle.sh` does for one node, and restore it once every node has
+read HOST_ACTIVE for a couple of minutes.
+
+The `bmc-agent.py` power agent and `tools/node-cycle.sh` call `lab.sh up/down`,
+so they boot nodes in whatever mode the environment or `lab.env` says (hub by
+default).
 
 ## Knobs (env vars)
 
@@ -73,6 +132,7 @@ first — `lab.sh` only manages the VMs.
 | `SSH_PRIV` | `./cluster_key` | key `lab.sh ssh` / `deploy` use |
 | `LAB_SSH_KEY` | `~/.ssh/id_ed25519` | key `lssh` / `lscp` use |
 | `IMG_URL` | Ubuntu noble current | base cloud image |
+| `LAB_NET_MODE` | `hub` | `hub` or `mcast` (rollback); beats `lab.env` (see Virtual LANs) |
 
 `./lab.sh info` prints the instance's identity (below) and everything it
 occupies on the host.
@@ -91,7 +151,7 @@ and `lab.sh` behaves exactly as before.
 |---|---|---|
 | `LAB_NODES` | `4` | node count (`$NODES` still wins) |
 | `LAB_SEEDPORT` | `8077` | seed HTTP port (beats `$SEEDPORT`) |
-| `LAB_MCAST` | `230.0.0.77:11877` | cluster LAN. **Never share it**: two labs on one group:port silently become one L2 segment |
+| `LAB_MCAST` | `230.0.0.77:11877` | cluster LAN in `LAB_NET_MODE=mcast` only (hub mode ignores it). **Never share it**: two labs on one group:port silently become one L2 segment |
 | `LAB_SSH_PORT_BASE` | `2230` | node N's ssh is `127.0.0.1:(base+N)` |
 | `LAB_LAN_PREFIX` | `10.77.0` | node N is `<prefix>.(10+N)` |
 | `LAB_MAC_PREFIX` | `52:54:00:77` | NICs are `<prefix>:00:N` (NAT) and `<prefix>:01:N` (LAN) |
@@ -120,7 +180,7 @@ lab 2 is `E2E_LAB_DIR=~/litevirt-lab2 E2E_LAB_PORT_BASE=2240`.
 
 Two non-litevirt VMs give a lab shared storage for NFS, iSCSI and Ceph pools
 and for fence drills. They are plain qemu like the nodes (`-cpu host`, the
-cluster LAN as the same multicast socket, cloud-init over the same HTTP seed),
+same cluster LAN (its lanhub), cloud-init over the same HTTP seed),
 sit on the instance's LAN at a static IP from `lab.env`, and never join the
 litevirt cluster.
 
@@ -281,7 +341,8 @@ alongside `$SSH_KEY`, so `lab.sh ssh` / `deploy` work with the agent locked.
 
 Everything except the scripts and docs is runtime state and gitignored:
 `images/` (base image), `nodes/` (overlays, pids, console logs), `seed-http/`
-(generated cloud-init data), `litevirt` (the binary under test).
+(generated cloud-init data), `hub/` (LAN hub sockets, pids, logs, stats),
+`lanhub/lanhub` (built from `lanhub/*.go`), `litevirt` (the binary under test).
 
 ## Running litevirt's e2e suite against this lab
 
