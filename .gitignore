@@ -28,3 +28,7 @@ seed.pid
 /secrets/
 /storage/
 /storage
+
+# Virtual LAN hubs (lab.sh "virtual LANs"): sockets, pid files, logs, stats
+/hub/
+/lanhub/lanhub

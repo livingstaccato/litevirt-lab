@@ -6,6 +6,9 @@ hand-seeding of host rows and no editing of join_peers.
 
     cd ~/litevirt-lab && ./lab.sh destroy && ./lab.sh create && ./lab.sh up
 
+`up` starts the lab's LAN hubs before any node (README, "Virtual LANs"); they keep
+running across `down`/`up` and are checked with `./lab.sh hub status`.
+
 ## SSH
 
 `create` authorises both `$SSH_KEY` (default `~/.ssh/id_ed25519.pub`) and the
