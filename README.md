@@ -305,6 +305,20 @@ tools/bmc.sh check
 tools/idm.sh provision && tools/idm.sh nodes && tools/idm.sh check
 ```
 
+### In-node test prerequisites: `tools/node-gaps.sh`
+
+What litevirt's test suite needs inside every node, on any lab (LAN prefix and
+migration CIDR come from `lab.env`): `linux-modules-extra` + a persistent
+`qemu_fw_cfg`; a per-lab SSH fence key (`secrets/lvfence_key`, gitignored,
+generated on first apply) so a node's root can ssh-fence its peers; and
+`migration.network` in `/etc/litevirt/config.yaml` on nodes with a `mignet` NIC.
+
+```bash
+CHECK=1 tools/node-gaps.sh            # read-only report, writes nothing
+tools/node-gaps.sh                    # apply (idempotent), then a node-1 -> node-2 fence-key ssh check
+tools/node-gaps.sh roll               # separate step: rolling daemon restart, witness first, to pick up config.yaml
+```
+
 **Never cycle a node with plain `lab.sh down/up` while its fence strategy is ssh
 or best-effort.** A coordinator that saw it offline SSH-powers it off again as
 soon as its sshd answers (~25 s into each boot), every boot. `node-cycle.sh`
