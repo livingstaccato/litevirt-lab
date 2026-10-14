@@ -305,6 +305,22 @@ tools/bmc.sh check
 tools/idm.sh provision && tools/idm.sh nodes && tools/idm.sh check
 ```
 
+### Migration network on an existing node: `tools/mignet.sh`
+
+A node created before `LAB_MIG_MCAST` was set has no `mignet` NIC and no netplan
+for it, and cloud-init does not run again. `tools/mignet.sh` writes
+`/etc/netplan/61-lab-extras.yaml` (from `lab.sh netplan-extras N`, validated with
+`netplan generate`, nothing applied live, no packages); the NIC itself needs the
+node's qemu restarted, one node at a time:
+
+```bash
+./lab.sh hub up mig                   # the new LAN's hub; the cluster LAN's is untouched
+tools/mignet.sh                       # netplan file on every node
+tools/node-cycle.sh N                 # per node: boot onto the mignet NIC
+CHECK=1 tools/mignet.sh               # read-only: file, NIC, address, ping over mignet
+tools/node-gaps.sh && tools/node-gaps.sh roll   # migration.network, then a daemon restart
+```
+
 ### In-node test prerequisites: `tools/node-gaps.sh`
 
 What litevirt's test suite needs inside every node, on any lab (LAN prefix and
