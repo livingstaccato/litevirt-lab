@@ -9,8 +9,7 @@ seed.pid
 /litevirt
 
 # Private keys never enter the repo
-/cluster_key
-/cluster_key.pub
+/cluster_key*
 *.pem
 *.key
 
