@@ -55,7 +55,9 @@ if [[ "$CHECK" != 1 ]]; then
   secrets_dir
   [[ -f "$FENCE_KEY" ]] || ssh-keygen -q -t ed25519 -N '' -C "lvfence-$STORAGE_PREFIX" -f "$FENCE_KEY"
   fence_priv="$(base64 -w0 < "$FENCE_KEY")"
-  fence_pub="$(cat "$FENCE_KEY.pub")"
+  # base64 like the private half: ssh joins remote args into one command line,
+  # so a key with spaces would arrive split into words.
+  fence_pub="$(base64 -w0 < "$FENCE_KEY.pub")"
 fi
 
 total=0
@@ -66,7 +68,7 @@ for n in "${targets[@]}"; do
 set -euo pipefail
 CHECK="$1"; LANP="$2"; MIG=""; [[ "$3" == - ]] || MIG="$3"
 PRIV=""; [[ "$4" == - ]] || PRIV="$(printf '%s' "$4" | base64 -d)"
-PUB="";  [[ "$5" == - ]] || PUB="$5"
+PUB="";  [[ "$5" == - ]] || PUB="$(printf '%s' "$5" | base64 -d)"
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1
 fails=0
 chk() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then echo "ok:   $d"; else echo "FAIL: $d"; fails=$((fails+1)); fi; }
@@ -83,6 +85,7 @@ if [[ "$CHECK" != 1 ]]; then
   # fence
   umask 077; mkdir -p /root/.ssh
   printf '%s\n' "$PRIV" > /root/.ssh/id_ed25519_lvfence.new; mv -f /root/.ssh/id_ed25519_lvfence.new /root/.ssh/id_ed25519_lvfence
+  sed -i '/^ssh-ed25519$/d' /root/.ssh/authorized_keys 2>/dev/null || true  # a bare key type the split-arg bug left
   grep -qxF "$PUB" /root/.ssh/authorized_keys 2>/dev/null || echo "$PUB" >> /root/.ssh/authorized_keys
   grep -q '^# lvfence' /root/.ssh/config 2>/dev/null || \
     printf '%s\n' "# lvfence (lab SSH fence drills)" "Host $LANP.*" "    IdentityFile ~/.ssh/id_ed25519_lvfence" >> /root/.ssh/config
