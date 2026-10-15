@@ -388,6 +388,13 @@ agent the tests install at first boot never arrives. `tools/guest-agent-image.sh
 bakes that image on node-1 (debs via `apt-get download` on the node, nothing on
 the lab host) and copies it to every node holding `ubuntu`; `REBUILD=1` replaces it.
 
+Lab 1's audit log carries known forks; pass them so
+`TestAuditVerifyReportsSigningState` skips on them and still fails on any other:
+
+```bash
+export E2E_KNOWN_AUDIT_FORK=b9fbdd30d8a95d0c@node-3,9bcb8393aec73858@node-4,1863b6419d3362ee@node-5
+```
+
 ## Running litevirt's tests on kvm003-f3
 
 `race-sweep.sh` runs a litevirt ref's tests on kvm003-f3 (128 cores) instead
