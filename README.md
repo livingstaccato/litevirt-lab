@@ -382,6 +382,12 @@ export LV_BIN=$PWD/litevirt   # the binary under test
 go test ./tests/e2e/...       # from the litevirt repo
 ```
 
+Guest-agent tests (`TestVM_NICMTU`'s guest side, `TestGuestExec`, the ISO
+drain) need `E2E_IMAGE=ubuntu-ga`: the guest bridges have no route out, so the
+agent the tests install at first boot never arrives. `tools/guest-agent-image.sh`
+bakes that image on node-1 (debs via `apt-get download` on the node, nothing on
+the lab host) and copies it to every node holding `ubuntu`; `REBUILD=1` replaces it.
+
 ## Running litevirt's tests on kvm003-f3
 
 `race-sweep.sh` runs a litevirt ref's tests on kvm003-f3 (128 cores) instead
