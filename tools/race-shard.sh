@@ -71,6 +71,13 @@ for ((i = 0; i < N; i++)); do
 done
 wait "${pids[@]}"
 
+# A concurrent sync of the tree (a second kbuild on the same worktree) deletes
+# $OUT mid-run; every count below would then read 0 and pass vacuously.
+if [[ ! -s $OUT/tests.txt ]] || ! ls "$OUT"/shard-*.log >/dev/null 2>&1; then
+  echo "RACE-SHARD $PKG FAIL output dir $OUT vanished mid-run (concurrent kbuild on this tree?)"
+  exit 1
+fi
+
 ran=$(cat "$OUT"/shard-*.log | grep -cE '^=== RUN   [A-Za-z0-9_]+$')
 races=$(cat "$OUT"/shard-*.log | grep -c 'WARNING: DATA RACE')
 fails=$(cat "$OUT"/shard-*.log | grep -cE '^--- FAIL: ')
