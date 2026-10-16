@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# fleet-shard: run tests/fleet of the current tree in 16 balanced shards (no -race).
+# Use from a kbuild command: kbuild.sh <worktree> "~/lab-build-tools/fleet-shard"
+SHARD_DURATIONS=$HOME/lab-build-tools/fleet-durations.txt NORACE=1 exec $HOME/lab-build-tools/race-shard.sh "$PWD" tests/fleet "${1:-16}" "${2:-40m}"

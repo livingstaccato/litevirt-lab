@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# grpcapi-race-shard: full -race run of internal/grpcapi in 32 balanced shards.
+SHARD_DURATIONS=$HOME/lab-build-tools/grpcapi-race-durations.txt exec $HOME/lab-build-tools/race-shard.sh "$PWD" internal/grpcapi "${1:-32}" "${2:-30m}"
