@@ -9,7 +9,7 @@ set -euo pipefail
 WT=$1; CMD=$2
 case "$WT" in /*) ;; *) echo "kbuild.sh: worktree path must be absolute" >&2; exit 2 ;; esac
 NAME=$(basename "$WT")
-SSH="timeout 3600 ssh -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=4 kvm003-f3"
+SSH="timeout 5400 ssh -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=4 kvm003-f3"
 cd "$WT"
 git ls-files -co --exclude-standard -z | tar --null -T - -cf - 2>/dev/null \
   | $SSH "rm -rf ~/kb-$NAME && mkdir -p ~/kb-$NAME && tar -x -C ~/kb-$NAME"
