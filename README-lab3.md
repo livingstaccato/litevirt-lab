@@ -38,6 +38,21 @@ cd ~/litevirt-lab3 && export LAB_SSH_KEY=$PWD/cluster_key
 ```
 
 Keep `TestSetup` in any `-test.run` selection: tests such as `TestCluster_Health`
-read the host list it discovers. Lab mode (`E2E_LAB_DIR=~/litevirt-lab3
-E2E_LAB_PORT_BASE=2270`, run on kvm003) is not usable yet: the harness
-hard-codes node IPs as 10.77.0.(10+N).
+read the host list it discovers.
+
+## e2e (lab mode, drills, on kvm003)
+
+Needs an e2e.test built from a ref with `E2E_LAB_PREFIX` (litevirt 5e6fbfad,
+in 9537a720 and later); older binaries hard-code 10.77.0.x.
+
+```bash
+cd ~/litevirt-lab3 && export LAB_SSH_KEY=$PWD/cluster_key
+env LITEVIRT_E2E=1 LV_BIN=/usr/local/bin/litevirt E2E_LAB_DIR=$HOME/litevirt-lab3 E2E_LAB_NODES=5 \
+  E2E_LAB_PORT_BASE=2270 E2E_LAB_PREFIX=10.79.0 E2E_LAB_MIGRATION_NET=10.79.1.0/24 \
+  E2E_DRILL_MEMORY=256M E2E_LAB_SOCKET_DIR=$HOME/litevirt-lab3/ssh-cm \
+  ./e2e-<sha>.test -test.v -test.timeout 30m -test.run '^TestDrill2_FrozenLeaseHolderWhileAHostFails$'
+```
+
+No witness and no BMC: witness drills (W*) skip, and node-3 (ssh fence) is
+never picked as a power-off victim. sqlite3 is installed on every node for
+read-only state queries (`sqlite3 -readonly /var/lib/litevirt/state.db`).
