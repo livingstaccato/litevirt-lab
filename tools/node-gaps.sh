@@ -3,8 +3,12 @@
 # node-gaps.sh roll [node...]   — rolling daemon restart (explicit, separate)
 # (default nodes: every node 1..N). Run on the lab host, from the lab dir.
 #
-#   mods    linux-modules-extra for the running kernel, qemu_fw_cfg loaded now and
-#           at every boot (/etc/modules-load.d/qemu_fw_cfg.conf)
+#   mods    linux-modules-extra for the running kernel, plus linux-image-extra-virtual
+#           (-> linux-image-generic), the metapackage that brings each future
+#           kernel's modules-extra with it, so a kernel unattended-upgrades
+#           installs does not boot without qemu_fw_cfg; qemu_fw_cfg loaded now
+#           and at every boot (/etc/modules-load.d/qemu_fw_cfg.conf).
+#           unattended-upgrades stays on (reported, never changed).
 #   fence   a per-lab SSH fence key, so a node's root can ssh-fence its peers:
 #           the private key as /root/.ssh/id_ed25519_lvfence, its public half in
 #           authorized_keys, and `Host <LAN prefix>.*` + IdentityFile in
@@ -79,6 +83,7 @@ has_mig() { ip -4 -o addr show mignet >/dev/null 2>&1; }
 if [[ "$CHECK" != 1 ]]; then
   # mods
   dpkg -s "linux-modules-extra-$k" >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq "linux-modules-extra-$k" >/dev/null; }
+  dpkg -s linux-image-extra-virtual >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq --no-install-recommends linux-image-extra-virtual >/dev/null; }
   modprobe qemu_fw_cfg
   echo qemu_fw_cfg > /etc/modules-load.d/qemu_fw_cfg.conf
 
@@ -101,6 +106,9 @@ fi
 
 # ── report ──────────────────────────────────────────────────────────────────
 chk "linux-modules-extra-$k installed" dpkg -s "linux-modules-extra-$k"
+chk "linux-image-extra-virtual installed (future kernels bring modules-extra)" dpkg -s linux-image-extra-virtual
+chk "every installed kernel has its modules-extra" sh -c 'for m in /lib/modules/*/; do v=$(basename "$m"); [ -f "/boot/vmlinuz-$v" ] || continue; dpkg -s "linux-modules-extra-$v" >/dev/null 2>&1 || exit 1; done'
+chk "unattended-upgrades enabled" sh -c 'systemctl is-enabled -q unattended-upgrades && grep -q "Unattended-Upgrade \"1\"" /etc/apt/apt.conf.d/20auto-upgrades'
 chk "qemu_fw_cfg loaded" sh -c 'lsmod | grep -q "^qemu_fw_cfg"'
 chk "qemu_fw_cfg persistent (modules-load.d)" grep -qx qemu_fw_cfg /etc/modules-load.d/qemu_fw_cfg.conf
 chk "fence key /root/.ssh/id_ed25519_lvfence (0600)" sh -c '[ "$(stat -c %a /root/.ssh/id_ed25519_lvfence)" = 600 ]'

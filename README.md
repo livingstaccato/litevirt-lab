@@ -176,6 +176,10 @@ LAB_SSH_KEY=$PWD/cluster_key ./lssh 1 hostname
 The e2e drills find a lab by directory and port base, so pointing them at
 lab 2 is `E2E_LAB_DIR=~/litevirt-lab2 E2E_LAB_PORT_BASE=2240`.
 
+Lab 3 is `~/litevirt-lab3` with `instances/kvm003-lab3.env` (10.79.0.x, ssh
+2271-2275, nodes on `/mnt/vmstore/litevirt-lab3`); its commands are in
+[README-lab3.md](README-lab3.md).
+
 ## Shared storage (lab 2)
 
 Two non-litevirt VMs give a lab shared storage for NFS, iSCSI and Ceph pools
@@ -324,8 +328,9 @@ tools/node-gaps.sh && tools/node-gaps.sh roll   # migration.network, then a daem
 ### In-node test prerequisites: `tools/node-gaps.sh`
 
 What litevirt's test suite needs inside every node, on any lab (LAN prefix and
-migration CIDR come from `lab.env`): `linux-modules-extra` + a persistent
-`qemu_fw_cfg`; a per-lab SSH fence key (`secrets/lvfence_key`, gitignored,
+migration CIDR come from `lab.env`): `linux-modules-extra` for the running
+kernel, `linux-image-extra-virtual` so every later kernel brings its own, and a
+persistent `qemu_fw_cfg`; a per-lab SSH fence key (`secrets/lvfence_key`, gitignored,
 generated on first apply) so a node's root can ssh-fence its peers; and
 `migration.network` in `/etc/litevirt/config.yaml` on nodes with a `mignet` NIC.
 
