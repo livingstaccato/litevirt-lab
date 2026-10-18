@@ -9,6 +9,11 @@
 #           installs does not boot without qemu_fw_cfg; qemu_fw_cfg loaded now
 #           and at every boot (/etc/modules-load.d/qemu_fw_cfg.conf).
 #           unattended-upgrades stays on (reported, never changed).
+#   fwmods  the nftables modules litevirt's firewall and its kernel tests use
+#           (NFLOG logging, limits, synproxy, bridge conntrack, NAT, reject),
+#           loaded now and at every boot (/etc/modules-load.d/litevirt-nft.conf).
+#           Children run under `unshare -rn`, where the kernel cannot autoload a
+#           module, so each must already be loaded. Built-in ones are skipped.
 #   fence   a per-lab SSH fence key, so a node's root can ssh-fence its peers:
 #           the private key as /root/.ssh/id_ed25519_lvfence, its public half in
 #           authorized_keys, and `Host <LAN prefix>.*` + IdentityFile in
@@ -74,6 +79,15 @@ CHECK="$1"; LANP="$2"; MIG=""; [[ "$3" == - ]] || MIG="$3"
 PRIV=""; [[ "$4" == - ]] || PRIV="$(printf '%s' "$4" | base64 -d)"
 PUB="";  [[ "$5" == - ]] || PUB="$(printf '%s' "$5" | base64 -d)"
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1
+# Keep in step with tools/fw-kernel-check.sh MODULES.
+FWMODS="nf_tables nf_conntrack nft_ct nf_conntrack_bridge nft_meta_bridge bridge veth
+nft_reject nft_reject_inet nf_reject_ipv4 nf_reject_ipv6 nf_nat nft_nat nft_masq nft_chain_nat
+nft_log nfnetlink_log nft_limit nft_counter nft_numgen nft_synproxy nf_synproxy_core"
+FWCONF=/etc/modules-load.d/litevirt-nft.conf
+# No .ko to load: built in, or compiled into another module (nft_counter is
+# part of nf_tables.ko on Ubuntu 6.8). The report names each such module; one
+# that is really absent is caught by fw-kernel-check.sh, whose test skips on it.
+no_ko() { ! modinfo -F filename "$1" 2>/dev/null | grep -q '\.ko'; }
 fails=0
 chk() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then echo "ok:   $d"; else echo "FAIL: $d"; fails=$((fails+1)); fi; }
 k="$(uname -r)"
@@ -84,8 +98,18 @@ if [[ "$CHECK" != 1 ]]; then
   # mods
   dpkg -s "linux-modules-extra-$k" >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq "linux-modules-extra-$k" >/dev/null; }
   dpkg -s linux-image-extra-virtual >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq --no-install-recommends linux-image-extra-virtual >/dev/null; }
+  # every installed kernel (the fallback too), so booting any of them has the modules
+  for b in /boot/vmlinuz-*; do v=${b#/boot/vmlinuz-}; [ -d "/lib/modules/$v" ] || continue
+    dpkg -s "linux-modules-extra-$v" >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq "linux-modules-extra-$v" >/dev/null; }
+  done
   modprobe qemu_fw_cfg
   echo qemu_fw_cfg > /etc/modules-load.d/qemu_fw_cfg.conf
+
+  # fwmods
+  { echo "# litevirt firewall + kernel tests (tools/node-gaps.sh)"
+    for m in $FWMODS; do no_ko "$m" && continue; modprobe "$m"; echo "$m"; done
+  } > "$FWCONF.new"
+  mv -f "$FWCONF.new" "$FWCONF"
 
   # fence
   umask 077; mkdir -p /root/.ssh
@@ -111,6 +135,11 @@ chk "every installed kernel has its modules-extra" sh -c 'for m in /lib/modules/
 chk "unattended-upgrades enabled" sh -c 'systemctl is-enabled -q unattended-upgrades && grep -q "Unattended-Upgrade \"1\"" /etc/apt/apt.conf.d/20auto-upgrades'
 chk "qemu_fw_cfg loaded" sh -c 'lsmod | grep -q "^qemu_fw_cfg"'
 chk "qemu_fw_cfg persistent (modules-load.d)" grep -qx qemu_fw_cfg /etc/modules-load.d/qemu_fw_cfg.conf
+for m in $FWMODS; do
+  no_ko "$m" && { echo "note: $m has no .ko on $k (built in or part of another module)"; continue; }
+  chk "$m loaded" test -d "/sys/module/$m"
+  chk "$m persistent ($FWCONF)" grep -qx "$m" "$FWCONF"
+done
 chk "fence key /root/.ssh/id_ed25519_lvfence (0600)" sh -c '[ "$(stat -c %a /root/.ssh/id_ed25519_lvfence)" = 600 ]'
 chk "fence key public half in authorized_keys" sh -c 'p="$(ssh-keygen -y -f /root/.ssh/id_ed25519_lvfence | cut -d" " -f1,2)"; [ -n "$p" ] && grep -qF "$p" /root/.ssh/authorized_keys'
 chk "ssh config: Host $LANP.* uses the fence key" sh -c "grep -qF 'Host $LANP.*' /root/.ssh/config && grep -qF id_ed25519_lvfence /root/.ssh/config"

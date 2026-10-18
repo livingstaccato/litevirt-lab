@@ -329,8 +329,11 @@ tools/node-gaps.sh && tools/node-gaps.sh roll   # migration.network, then a daem
 
 What litevirt's test suite needs inside every node, on any lab (LAN prefix and
 migration CIDR come from `lab.env`): `linux-modules-extra` for the running
-kernel, `linux-image-extra-virtual` so every later kernel brings its own, and a
-persistent `qemu_fw_cfg`; a per-lab SSH fence key (`secrets/lvfence_key`, gitignored,
+kernel, `linux-image-extra-virtual` so every later kernel brings its own, a
+persistent `qemu_fw_cfg`, and the nftables modules the firewall kernel tests
+need (`nfnetlink_log`, `nft_log`, `nft_limit` and the rest of
+`tools/fw-kernel-check.sh`'s list), loaded and persisted in
+`/etc/modules-load.d/litevirt-nft.conf`; a per-lab SSH fence key (`secrets/lvfence_key`, gitignored,
 generated on first apply) so a node's root can ssh-fence its peers; and
 `migration.network` in `/etc/litevirt/config.yaml` on nodes with a `mignet` NIC.
 
