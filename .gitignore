@@ -43,3 +43,13 @@ seed.pid
 
 # Bundles that carried laptop commits to a lab host (BOOTSTRAP: signed on the laptop)
 /.lab*.bundle
+
+# Per-run artifacts in a lab instance dir (lab-build binaries, e2e test
+# binaries, run evidence). Kept on disk, never committed.
+/runs/
+/runs-archive/
+/evidence/
+/e2e-*.test
+/litevirt-int-*
+/litevirt-proof-*
+/wt-*
