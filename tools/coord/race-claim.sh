@@ -11,7 +11,7 @@
 set -euo pipefail
 B=$HOME/litevirt-coord/board.log
 LOCK=$HOME/litevirt-coord/race.lock
-MAX=3
+MAX=4
 STALE_SECS=$((6 * 3600))
 
 open_claims() {
