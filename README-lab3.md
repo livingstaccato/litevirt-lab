@@ -2,6 +2,7 @@
 
 5 nodes, 10.79.0.11-15 (migration net 10.79.1.11-15), ssh 127.0.0.1:2271-2275,
 hub mode, nodes on /mnt/vmstore/litevirt-lab3. Identity: instances/kvm003-lab3.env.
+Nodes run Ubuntu 26.04 (`LAB_UBUNTU_RELEASE=resolute`; labs 1 and 2 are on 24.04).
 node-3 fences over ssh, the others best-effort. Operator CLI: node-1 (and node-5).
 
 ## Boot / stop

@@ -17,7 +17,7 @@ tests (`tests/fleet/`) don't need it.
 ## Quickstart
 
 ```bash
-./lab.sh image      # fetch the Ubuntu noble cloud image (once)
+./lab.sh image      # fetch the Ubuntu cloud image (once per release)
 ./lab.sh create     # write per-node seed data + qcow2 overlays
 ./lab.sh up         # boot all nodes (starts the seed HTTP server)
 ./lab.sh status     # per-node pid / IP / ssh port / cloud-init state
@@ -131,7 +131,8 @@ default).
 | `SSH_KEY` | `~/.ssh/id_ed25519.pub` | pubkey authorized on every node at `create` |
 | `SSH_PRIV` | `./cluster_key` | key `lab.sh ssh` / `deploy` use |
 | `LAB_SSH_KEY` | `~/.ssh/id_ed25519` | key `lssh` / `lscp` use |
-| `IMG_URL` | Ubuntu noble current | base cloud image |
+| `LAB_UBUNTU_RELEASE` | `noble` | node OS codename (lab.env); picks the base image file and its URL |
+| `IMG_URL` | Ubuntu `<release>` current | base cloud image |
 | `LAB_NET_MODE` | `hub` | `hub` or `mcast` (rollback); beats `lab.env` (see Virtual LANs) |
 
 `./lab.sh info` prints the instance's identity (below) and everything it

@@ -44,6 +44,7 @@ unset LAB_NODES LAB_SEEDPORT LAB_MCAST LAB_SSH_PORT_BASE LAB_LAN_PREFIX LAB_MAC_
 unset LAB_STORAGE_PREFIX LAB_STORAGE_SSH_PORT_BASE LAB_STORAGE_NFS_IP LAB_STORAGE_CEPH_IP
 # Opt-in node hardware, extra networks and aux VMs (see "lab extras" below and
 # the README). Every one is off unless the instance's lab.env sets it.
+unset LAB_UBUNTU_RELEASE
 unset LAB_NODE_HW LAB_NODE_HW_NODES LAB_NODE_MEM LAB_NODE_QMP LAB_IGB_MCAST \
       LAB_MIG_MCAST LAB_MIG_PREFIX LAB_TRUNK_MCAST LAB_LAN6_PREFIX LAB_CGROUP_V1_NODES \
       LAB_AUX_ROLES LAB_AUX_SSH_PORT_BASE LAB_BMC_IP LAB_BMC_IPMI_BASE LAB_BMC_NODES \
@@ -51,8 +52,14 @@ unset LAB_NODE_HW LAB_NODE_HW_NODES LAB_NODE_MEM LAB_NODE_QMP LAB_IGB_MCAST \
 # shellcheck source=/dev/null
 [[ -f "$LAB/lab.env" ]] && . "$LAB/lab.env"
 
-BASE="$LAB/images/noble-cloudimg-amd64.img"
-IMG_URL="${IMG_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
+# The node OS: an Ubuntu release codename, from lab.env. noble (24.04) unless the
+# instance picks another (lab 3: resolute, 26.04, for QEMU >= 9.1 / libvirt >= 11.2).
+# Each release has its own base image file, so labs on different releases never
+# share a backing file, and switching one is `image` + `destroy` + `create`.
+UBUNTU_RELEASE="${LAB_UBUNTU_RELEASE:-noble}"
+[[ "$UBUNTU_RELEASE" =~ ^[a-z]+$ ]] || { echo "LAB_UBUNTU_RELEASE must be a codename: $UBUNTU_RELEASE" >&2; exit 2; }
+BASE="$LAB/images/$UBUNTU_RELEASE-cloudimg-amd64.img"
+IMG_URL="${IMG_URL:-https://cloud-images.ubuntu.com/$UBUNTU_RELEASE/current/$UBUNTU_RELEASE-server-cloudimg-amd64.img}"
 NODES="${NODES:-${LAB_NODES:-4}}"
 VCPUS="${VCPUS:-4}"
 MEM="${MEM:-3072}"
