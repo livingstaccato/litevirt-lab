@@ -93,15 +93,24 @@ chk() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then echo "ok:   $d"; else
 k="$(uname -r)"
 cfg=/etc/litevirt/config.yaml
 has_mig() { ip -4 -o addr show mignet >/dev/null 2>&1; }
+# Ubuntu 26.04 (resolute) has no modules-extra split: qemu_fw_cfg and the nft
+# modules ship in linux-modules-<k> itself, and linux-modules-extra-<k> does not
+# exist. "merged" when the running kernel's qemu_fw_cfg is owned by
+# linux-modules-<k>; on noble it is absent or owned by modules-extra (split).
+merged=0
+f="$(modinfo -n qemu_fw_cfg 2>/dev/null || true)"
+[[ -n "$f" ]] && dpkg -S "$f" 2>/dev/null | grep -q "^linux-modules-$k:" && merged=1
 
 if [[ "$CHECK" != 1 ]]; then
   # mods
+  [[ $merged = 1 ]] || {
   dpkg -s "linux-modules-extra-$k" >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq "linux-modules-extra-$k" >/dev/null; }
   dpkg -s linux-image-extra-virtual >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq --no-install-recommends linux-image-extra-virtual >/dev/null; }
   # every installed kernel (the fallback too), so booting any of them has the modules
   for b in /boot/vmlinuz-*; do v=${b#/boot/vmlinuz-}; [ -d "/lib/modules/$v" ] || continue
     dpkg -s "linux-modules-extra-$v" >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq "linux-modules-extra-$v" >/dev/null; }
   done
+  }
   modprobe qemu_fw_cfg
   echo qemu_fw_cfg > /etc/modules-load.d/qemu_fw_cfg.conf
 
@@ -129,9 +138,14 @@ if [[ "$CHECK" != 1 ]]; then
 fi
 
 # ── report ──────────────────────────────────────────────────────────────────
+if [[ $merged = 1 ]]; then
+echo "note: $k has no modules-extra split (qemu_fw_cfg is in linux-modules-$k)"
+chk "linux-modules-$k installed" dpkg -s "linux-modules-$k"
+else
 chk "linux-modules-extra-$k installed" dpkg -s "linux-modules-extra-$k"
 chk "linux-image-extra-virtual installed (future kernels bring modules-extra)" dpkg -s linux-image-extra-virtual
 chk "every installed kernel has its modules-extra" sh -c 'for m in /lib/modules/*/; do v=$(basename "$m"); [ -f "/boot/vmlinuz-$v" ] || continue; dpkg -s "linux-modules-extra-$v" >/dev/null 2>&1 || exit 1; done'
+fi
 chk "unattended-upgrades enabled" sh -c 'systemctl is-enabled -q unattended-upgrades && grep -q "Unattended-Upgrade \"1\"" /etc/apt/apt.conf.d/20auto-upgrades'
 chk "qemu_fw_cfg loaded" sh -c 'lsmod | grep -q "^qemu_fw_cfg"'
 chk "qemu_fw_cfg persistent (modules-load.d)" grep -qx qemu_fw_cfg /etc/modules-load.d/qemu_fw_cfg.conf
