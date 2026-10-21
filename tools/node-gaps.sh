@@ -98,7 +98,8 @@ has_mig() { ip -4 -o addr show mignet >/dev/null 2>&1; }
 # exist. "merged" when the running kernel's qemu_fw_cfg is owned by
 # linux-modules-<k>; on noble it is absent or owned by modules-extra (split).
 merged=0
-f="$(modinfo -n qemu_fw_cfg 2>/dev/null || true)"
+# readlink -f: modinfo prints /lib/modules/..., dpkg records /usr/lib/modules/...
+f="$(readlink -f "$(modinfo -n qemu_fw_cfg 2>/dev/null || true)" || true)"
 [[ -n "$f" ]] && dpkg -S "$f" 2>/dev/null | grep -q "^linux-modules-$k:" && merged=1
 
 if [[ "$CHECK" != 1 ]]; then
