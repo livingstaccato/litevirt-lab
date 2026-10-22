@@ -10,7 +10,8 @@
 #
 #   LAB_NODE_HW nodes   kernel cmdline intel_iommu=on iommu=pt; pciutils, usbutils,
 #                       smartmontools, nvme-cli; LAB_SRIOV_VFS (default 2) igb VFs
-#                       made at boot by lab-sriov-vfs.service
+#                       made at boot by lab-sriov-vfs.service; vfio-pci loaded
+#                       and persisted (modules-load.d/lab-vfio.conf)
 #   every node          /etc/netplan/61-lab-extras.yaml (`lab.sh netplan-extras N`)
 #                       and the cluster NIC's ULA (LAB_LAN6_PREFIX) in 60-cluster.yaml;
 #                       /srv/lv-e2e-mounts/data for containers.bind_mount_paths;
@@ -102,6 +103,11 @@ WantedBy=multi-user.target
 UNIT
     systemctl daemon-reload
     systemctl enable lab-sriov-vfs.service >/dev/null 2>&1
+    # vfio-pci, a litevirt passthrough prerequisite (docs/pci-passthrough.md):
+    # without it a bind fails with 'driver is "none", expected vfio-pci'. Loaded
+    # with no ids, so it claims nothing until litevirt sets a driver_override.
+    echo vfio-pci > /etc/modules-load.d/lab-vfio.conf
+    modprobe vfio-pci
   fi
 
   # A directory for containers.bind_mount_paths (LV_E2E_MOUNT_DIR).
@@ -118,6 +124,8 @@ if [[ "$HW" == 1 ]]; then
   chk "grub has intel_iommu=on iommu=pt" grep -q 'intel_iommu=on iommu=pt' /boot/grub/grub.cfg
   chk "lab-sriov-vfs.service enabled" systemctl is-enabled lab-sriov-vfs.service
   for t in lspci lsusb smartctl nvme; do chk "$t installed" command -v "$t"; done
+  chk "vfio-pci in modules-load.d" grep -qx vfio-pci /etc/modules-load.d/lab-vfio.conf
+  chk "running: vfio-pci loaded" test -d /sys/bus/pci/drivers/vfio-pci
   if grep -qw intel_iommu=on /proc/cmdline; then
     chk "running: IOMMU groups present" sh -c 'ls /sys/kernel/iommu_groups | grep -q .'
     chk "running: igb VFs ($VFS)" sh -c "[ \"\$(cat /sys/class/net/sriov0/device/sriov_numvfs)\" = $VFS ]"
