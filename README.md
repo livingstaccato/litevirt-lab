@@ -181,6 +181,10 @@ Lab 3 is `~/litevirt-lab3` with `instances/kvm003-lab3.env` (10.79.0.x, ssh
 2271-2275, nodes on `/mnt/vmstore/litevirt-lab3`); its commands are in
 [README-lab3.md](README-lab3.md).
 
+Lab 4 is `~/litevirt-lab4` with `instances/kvm003-lab4.env` (10.80.0.x, ssh
+2281-2285, seed 8080, nodes on `/mnt/vmstore/litevirt-lab4`), built like lab 3;
+see [README-lab4.md](README-lab4.md).
+
 ## Shared storage (lab 2)
 
 Two non-litevirt VMs give a lab shared storage for NFS, iSCSI and Ceph pools
